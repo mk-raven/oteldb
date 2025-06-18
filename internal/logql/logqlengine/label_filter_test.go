@@ -11,6 +11,70 @@ import (
 	"github.com/go-faster/oteldb/internal/logql"
 )
 
+func TestStringLabelFilter(t *testing.T) {
+	tests := []struct {
+		input  map[logql.Label]pcommon.Value
+		label  string
+		op     logql.BinOp
+		value  string
+		wantOk bool
+	}{
+		// No label.
+		{
+			map[logql.Label]pcommon.Value{},
+			`not_exist`,
+			logql.OpEq,
+			"",
+			true,
+		},
+		{
+			map[logql.Label]pcommon.Value{},
+			`not_exist`,
+			logql.OpNotEq,
+			"",
+			false,
+		},
+
+		// Has match.
+		{
+			map[logql.Label]pcommon.Value{
+				"exist": pcommon.NewValueStr("foo"),
+			},
+			"exist",
+			logql.OpEq,
+			"foo",
+			true,
+		},
+		{
+			map[logql.Label]pcommon.Value{
+				"exist": pcommon.NewValueStr("foo"),
+			},
+			"exist",
+			logql.OpNotEq,
+			"bar",
+			true,
+		},
+	}
+	for i, tt := range tests {
+		tt := tt
+		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
+			set := newLabelSet(tt.input)
+
+			f, err := buildLabelMatcher(logql.LabelMatcher{
+				Label: logql.Label(tt.label),
+				Op:    tt.op,
+				Value: tt.value,
+			})
+			require.NoError(t, err)
+
+			newLine, gotOk := f.Process(0, ``, set)
+			// Ensure that extractor does not change the line.
+			require.Equal(t, ``, newLine)
+			require.Equal(t, tt.wantOk, gotOk)
+		})
+	}
+}
+
 func TestDurationLabelFilter(t *testing.T) {
 	tests := []struct {
 		input         map[logql.Label]pcommon.Value
@@ -109,8 +173,7 @@ func TestDurationLabelFilter(t *testing.T) {
 	for i, tt := range tests {
 		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
-			set := newLabelSet()
-			set.labels = tt.input
+			set := newLabelSet(tt.input)
 
 			f, err := buildDurationLabelFilter(&logql.DurationFilter{
 				Label: logql.Label(tt.label),
@@ -234,8 +297,7 @@ func TestBytesLabelFilter(t *testing.T) {
 	for i, tt := range tests {
 		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
-			set := newLabelSet()
-			set.labels = tt.input
+			set := newLabelSet(tt.input)
 
 			f, err := buildBytesLabelFilter(&logql.BytesFilter{
 				Label: logql.Label(tt.label),
@@ -379,8 +441,7 @@ func TestNumberLabelFilter(t *testing.T) {
 	for i, tt := range tests {
 		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
-			set := newLabelSet()
-			set.labels = tt.input
+			set := newLabelSet(tt.input)
 
 			f, err := buildNumberLabelFilter(&logql.NumberFilter{
 				Label: logql.Label(tt.label),
@@ -509,9 +570,8 @@ func TestIPLabelFilter(t *testing.T) {
 	for i, tt := range tests {
 		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
-			set := newLabelSet()
 			_, hasLabel := tt.input[tt.label]
-			set.labels = tt.input
+			set := newLabelSet(tt.input)
 
 			for _, cse := range []struct {
 				op     logql.BinOp

@@ -35,12 +35,14 @@ func loadConfig(name string) (cfg Config, _ error) {
 	return cfg, nil
 }
 
-// Config is a oteldb config.
+// Config is the oteldb config.
 type Config struct {
-	DSN        string           `json:"dsn" yaml:"dsn"`
-	Tempo      TempoConfig      `json:"tempo" yaml:"tempo"`
-	Prometheus PrometheusConfig `json:"prometheus" yaml:"prometheus"`
-	LokiConfig LokiConfig       `json:"loki" yaml:"loki"`
+	DSN         string            `json:"dsn" yaml:"dsn"`
+	TTL         time.Duration     `json:"ttl" yaml:"ttl"`
+	Tempo       TempoConfig       `json:"tempo" yaml:"tempo"`
+	Prometheus  PrometheusConfig  `json:"prometheus" yaml:"prometheus"`
+	LokiConfig  LokiConfig        `json:"loki" yaml:"loki"`
+	HealthCheck HealthCheckConfig `json:"health_check" yaml:"health_check"`
 
 	// Collector is an otelcol config.
 	Collector map[string]any `json:"otelcol" yaml:"otelcol"`
@@ -55,8 +57,12 @@ func (cfg *Config) setDefaults() {
 			"receivers": map[string]any{
 				"otlp": map[string]any{
 					"protocols": map[string]any{
-						"grpc": nil,
-						"http": nil,
+						"grpc": map[string]any{
+							"endpoint": "0.0.0.0:4317",
+						},
+						"http": map[string]any{
+							"endpoint": "0.0.0.0:4318",
+						},
 					},
 				},
 				"prometheusremotewrite": map[string]any{},
@@ -135,5 +141,16 @@ type LokiConfig struct {
 func (cfg *LokiConfig) setDefaults() {
 	if cfg.Bind == "" {
 		cfg.Bind = ":3100"
+	}
+}
+
+// HealthCheckConfig is health check config.
+type HealthCheckConfig struct {
+	Bind string `json:"bind" yaml:"bind"`
+}
+
+func (cfg *HealthCheckConfig) setDefaults() {
+	if cfg.Bind == "" {
+		cfg.Bind = ":13133"
 	}
 }

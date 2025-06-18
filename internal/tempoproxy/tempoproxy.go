@@ -24,6 +24,16 @@ type Server struct {
 	api *tempoapi.Client
 }
 
+// BuildInfo implements buildInfo operation.
+//
+// Returns Tempo buildinfo, in the same format as Prometheus `/api/v1/status/buildinfo`.
+// Used by Grafana to check Tempo API version.
+//
+// GET /api/status/buildinfo
+func (s *Server) BuildInfo(ctx context.Context) (*tempoapi.PrometheusVersion, error) {
+	return s.api.BuildInfo(ctx)
+}
+
 // Echo implements echo operation.
 // Echo request for testing, issued by Grafana.
 //
@@ -65,8 +75,17 @@ func (s *Server) SearchTagValuesV2(ctx context.Context, params tempoapi.SearchTa
 // This endpoint retrieves all discovered tag names that can be used in search.
 //
 // GET /api/search/tags
-func (s *Server) SearchTags(ctx context.Context) (*tempoapi.TagNames, error) {
-	return s.api.SearchTags(ctx)
+func (s *Server) SearchTags(ctx context.Context, params tempoapi.SearchTagsParams) (*tempoapi.TagNames, error) {
+	return s.api.SearchTags(ctx, params)
+}
+
+// SearchTagsV2 implements searchTagsV2 operation.
+//
+// This endpoint retrieves all discovered tag names that can be used in search.
+//
+// GET /api/v2/search/tags
+func (s *Server) SearchTagsV2(ctx context.Context, params tempoapi.SearchTagsV2Params) (*tempoapi.TagNamesV2, error) {
+	return s.api.SearchTagsV2(ctx, params)
 }
 
 // TraceByID implements traceByID operation.

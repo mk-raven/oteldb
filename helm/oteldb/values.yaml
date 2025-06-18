@@ -5,7 +5,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/go-faster/oteldb:0.3.1
+  repository: ghcr.io/go-faster/oteldb
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
@@ -38,7 +38,6 @@ securityContext: {}
 
 service:
   type: ClusterIP
-  port: 80
 
 ingress:
   enabled: false
@@ -68,12 +67,31 @@ resources: {}
   #   cpu: 100m
   #   memory: 128Mi
 
+env:
+  - name: OTEL_LOG_LEVEL
+    value: "DEBUG"
+
+config:
+  dsn:
+  ttl:
+  tempo:
+    bind: 0.0.0.0:3200
+  prometheus:
+    bind: 0.0.0.0:9090
+    max_samples: 1_000_000
+    timeout: 1m
+    enable_negative_offset: true
+  loki:
+    bind: 0.0.0.0:3100
+  health_check:
+    bind: 0.0.0.0:13133
+
 autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 100
-  targetCPUUtilizationPercentage: 80
-  # targetMemoryUtilizationPercentage: 80
+  cpuUtilizationPercentage: 80
+  memoryUtilizationPercentage: 80
 
 nodeSelector: {}
 

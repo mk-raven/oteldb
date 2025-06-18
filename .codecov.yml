@@ -6,8 +6,16 @@ ignore:
   # Skip non-production code.
   - "internal/lokiproxy/"
   - "internal/pyroproxy/"
+  - "internal/promproxy/"
+  - "internal/otelbench/"
+  - "cmd/oteldemo/"
+  - "cmd/otelproxy/"
   # Skip vendored-forked
   - "internal/promcompliance/"
+  # Skip benchmarks
+  - "cmd/otelbench/"
+  # Skip complience tests
+  - "cmd/promql-compliance-tester/"
 coverage:
   status:
     project: false

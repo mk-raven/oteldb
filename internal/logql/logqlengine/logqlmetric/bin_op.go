@@ -5,6 +5,8 @@ import (
 	"go.uber.org/multierr"
 
 	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlabels"
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlerrors"
 )
 
 // BinOp returns new step iterator performing binary operation between two iterators.
@@ -13,7 +15,7 @@ func BinOp(
 	expr *logql.BinOpExpr,
 ) (StepIterator, error) {
 	if m := expr.Modifier; m.Op != "" || len(m.OpLabels) > 0 || m.Group != "" || len(m.Include) > 0 {
-		return nil, &UnsupportedError{Msg: "binary operation modifiers are unsupported yet"}
+		return nil, &logqlerrors.UnsupportedError{Msg: "binary operation modifiers are unsupported yet"}
 	}
 
 	switch expr.Op {
@@ -56,7 +58,7 @@ func (i *binOpIterator) Next(r *Step) bool {
 	r.Samples = r.Samples[:0]
 	r.Timestamp = left.Timestamp
 
-	leftSamples := make(map[GroupingKey]Sample, len(left.Samples))
+	leftSamples := make(map[logqlabels.GroupingKey]Sample, len(left.Samples))
 	for _, s := range left.Samples {
 		key := s.Set.Key()
 		leftSamples[key] = s
@@ -180,8 +182,8 @@ func buildMergeSamplesOp(op logql.BinOp, grouper grouperFunc, groupLabels []logq
 	}
 }
 
-func samplesSet(samples []Sample, grouper grouperFunc, groupLabels []logql.Label) map[GroupingKey]struct{} {
-	r := make(map[GroupingKey]struct{}, len(samples))
+func samplesSet(samples []Sample, grouper grouperFunc, groupLabels []logql.Label) map[logqlabels.GroupingKey]struct{} {
+	r := make(map[logqlabels.GroupingKey]struct{}, len(samples))
 	for _, s := range samples {
 		key := grouper(s.Set, groupLabels...).Key()
 		r[key] = struct{}{}

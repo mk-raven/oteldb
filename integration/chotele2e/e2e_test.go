@@ -13,6 +13,7 @@ import (
 	"github.com/go-faster/errors"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
+	testcontainerslog "github.com/testcontainers/testcontainers-go/log"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
@@ -31,13 +32,13 @@ func ConnectOpt(t *testing.T, connOpt ch.Options) *ch.Client {
 
 	req := testcontainers.ContainerRequest{
 		Name:         "oteldb-chotel-clickhouse",
-		Image:        "clickhouse/clickhouse-server:23.10",
+		Image:        "clickhouse/clickhouse-server:23.12",
 		ExposedPorts: []string{"8123/tcp", "9000/tcp"},
 	}
 	chContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
-		Logger:           testcontainers.TestLogger(t),
+		Logger:           testcontainerslog.TestLogger(t),
 		Reuse:            true,
 	})
 	require.NoError(t, err, "container start")
@@ -107,7 +108,9 @@ func TestIntegrationTrace(t *testing.T) {
 		Body:   fmt.Sprintf("SELECT %s FROM system.opentelemetry_span_log", strings.Join(table.Columns(), ", ")),
 		Result: table.Result(),
 		OnResult: func(ctx context.Context, block proto.Block) error {
-			traces = append(traces, table.Rows()...)
+			for row := range table.Rows() {
+				traces = append(traces, row)
+			}
 			return nil
 		},
 	}))

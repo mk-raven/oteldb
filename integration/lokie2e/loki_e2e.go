@@ -48,7 +48,6 @@ func NewBatchSet() *BatchSet {
 		s.addLabel(logstorage.Label{
 			Name:  logstorage.LabelSeverity,
 			Value: i.String(),
-			Type:  int32(pcommon.ValueTypeStr),
 		})
 	}
 
@@ -68,16 +67,12 @@ func (s *BatchSet) Append(raw plog.Logs) error {
 		scopeLogs := resLog.ScopeLogs()
 		for i := 0; i < scopeLogs.Len(); i++ {
 			scopeLog := scopeLogs.At(i)
-			scope := scopeLog.Scope()
-			s.addLabels(scope.Attributes())
-
 			records := scopeLog.LogRecords()
 			for i := 0; i < records.Len(); i++ {
 				record := records.At(i)
 				if err := s.addRecord(record); err != nil {
 					return errors.Wrap(err, "add record")
 				}
-				s.addLabels(record.Attributes())
 			}
 		}
 	}
@@ -113,7 +108,6 @@ func (s *BatchSet) addLabels(m pcommon.Map) {
 			s.addLabel(logstorage.Label{
 				Name:  k,
 				Value: v.AsString(),
-				Type:  int32(t),
 			})
 		}
 		return true

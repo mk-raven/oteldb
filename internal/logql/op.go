@@ -22,6 +22,8 @@ const (
 	OpNotEq
 	OpRe
 	OpNotRe
+	OpPattern
+	OpNotPattern
 	OpGt
 	OpGte
 	OpLt
@@ -62,6 +64,11 @@ func (op BinOp) Precedence() int {
 	}
 }
 
+// IsRightAssoc whether if operator is right-associative.
+func (op BinOp) IsRightAssoc() bool {
+	return op == OpPow
+}
+
 // String implements fmt.Stringer.
 func (op BinOp) String() string {
 	switch op {
@@ -91,14 +98,18 @@ func (op BinOp) String() string {
 		return "=~"
 	case OpNotRe:
 		return "!~"
+	case OpPattern:
+		return "|>"
+	case OpNotPattern:
+		return "!>"
 	case OpGt:
-		return "<"
-	case OpGte:
-		return "<="
-	case OpLt:
 		return ">"
-	case OpLte:
+	case OpGte:
 		return ">="
+	case OpLt:
+		return "<"
+	case OpLte:
+		return "<="
 	default:
 		return fmt.Sprintf("<unknown op %d>", op)
 	}

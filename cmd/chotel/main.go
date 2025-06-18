@@ -35,19 +35,22 @@ import (
 )
 
 func main() {
-	app.Run(func(ctx context.Context, lg *zap.Logger, m *app.Metrics) (err error) {
+	app.Run(func(ctx context.Context, lg *zap.Logger, m *app.Telemetry) (err error) {
 		a, err := NewApp(lg, m)
 		if err != nil {
 			return errors.Wrap(err, "init")
 		}
+		ctx = zctx.WithOpenTelemetryZap(ctx)
 		return a.Run(ctx)
-	})
+	},
+		app.WithServiceName("oteldb.chotel"),
+	)
 }
 
 // App is the trace exporter application.
 type App struct {
 	log     *zap.Logger
-	metrics *app.Metrics
+	metrics *app.Telemetry
 
 	clickHouseAddr     string
 	clickHousePassword string
@@ -57,6 +60,7 @@ type App struct {
 	otlpAddr string
 
 	latest time.Time
+	rate   time.Duration
 
 	spansSaved    metric.Int64Counter
 	traceExporter *otlptrace.Exporter
@@ -74,7 +78,7 @@ const DDL = `CREATE TABLE IF NOT EXISTS opentelemetry_span_export
 `
 
 // NewApp initializes the trace exporter application.
-func NewApp(lg *zap.Logger, metrics *app.Metrics) (*App, error) {
+func NewApp(lg *zap.Logger, metrics *app.Telemetry) (*App, error) {
 	a := &App{
 		log:                lg,
 		metrics:            metrics,
@@ -83,6 +87,14 @@ func NewApp(lg *zap.Logger, metrics *app.Metrics) (*App, error) {
 		clickHousePassword: "",
 		clickHouseDB:       "default",
 		otlpAddr:           "otelcol:4317",
+		rate:               time.Millisecond * 500,
+	}
+	if v := os.Getenv("CHOTEL_SEND_RATE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, errors.Wrap(err, "parse CHOTEL_SEND_RATE")
+		}
+		a.rate = d
 	}
 	if v := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
 		a.otlpAddr = strings.TrimPrefix(v, "http://")
@@ -112,12 +124,12 @@ func NewApp(lg *zap.Logger, metrics *app.Metrics) (*App, error) {
 			return nil, err
 		}
 	}
-	lg.Info("Initialized")
 	return a, nil
 }
 
 // Run starts and runs the application.
 func (a *App) Run(ctx context.Context) error {
+	ctx = zctx.WithOpenTelemetryZap(ctx)
 	ctx = zctx.Base(ctx, a.log)
 	if err := a.setup(ctx); err != nil {
 		return errors.Wrap(err, "setup")
@@ -156,31 +168,31 @@ func (a *App) setup(ctx context.Context) error {
 		return errors.Wrap(err, "ensure db")
 	}
 
-	conn, err := grpc.DialContext(ctx, a.otlpAddr,
+	conn, err := grpc.NewClient(a.otlpAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler(
-			otelgrpc.WithTracerProvider(a.metrics.TracerProvider()),
 			otelgrpc.WithMeterProvider(a.metrics.MeterProvider()),
 		)),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return errors.Wrap(err, "dial otlp")
 	}
+
 	traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
 	if err != nil {
 		return errors.Wrap(err, "setup trace exporter")
 	}
 	a.traceExporter = traceExporter
-	a.log.Info("Initialized")
+	a.log.Info("Ready to export traces")
 	return nil
 }
 
-func (a *App) send(ctx context.Context, now time.Time) error {
-	ctx, span := a.metrics.TracerProvider().Tracer("chotel").Start(ctx, "Export spans")
-	defer span.End()
+func noPropagation(ctx context.Context) context.Context {
+	return trace.ContextWithSpanContext(ctx, trace.SpanContext{})
+}
 
-	db, err := ch.Dial(ctx, ch.Options{
+func (a *App) send(ctx context.Context, now time.Time) error {
+	db, err := ch.Dial(noPropagation(ctx), ch.Options{
 		Address:     a.clickHouseAddr,
 		Compression: ch.CompressionZSTD,
 		User:        a.clickHouseUser,
@@ -222,13 +234,13 @@ func (a *App) send(ctx context.Context, now time.Time) error {
 		return errors.Wrap(err, "clickhouse resource")
 	}
 	var latest time.Time
-	if err := db.Do(ctx, ch.Query{
+	if err := db.Do(noPropagation(ctx), ch.Query{
 		Body:   q,
 		Result: t.Result(),
 		OnResult: func(ctx context.Context, block proto.Block) error {
 			exported.TraceID = append(exported.TraceID, t.TraceID...)
 			exported.SpanID = append(exported.SpanID, t.SpanID...)
-			for _, r := range t.Rows() {
+			for r := range t.Rows() {
 				exported.ExportedAt.Append(now)
 				stub := tracetest.SpanStub{
 					SpanKind:  r.Kind,
@@ -287,7 +299,7 @@ func (a *App) send(ctx context.Context, now time.Time) error {
 	}, eb); err != nil {
 		return errors.Wrap(err, "export")
 	}
-	if err := db.Do(ctx, ch.Query{
+	if err := db.Do(noPropagation(ctx), ch.Query{
 		Body: "INSERT INTO opentelemetry_span_export (trace_id, span_id, exported_at) VALUES",
 		Input: proto.Input{
 			{Name: "trace_id", Data: exported.TraceID},
@@ -306,7 +318,7 @@ func (a *App) send(ctx context.Context, now time.Time) error {
 }
 
 func (a *App) runSender(ctx context.Context) error {
-	ticker := time.NewTicker(time.Millisecond * 500)
+	ticker := time.NewTicker(a.rate)
 	defer ticker.Stop()
 
 	// First immediate tick.

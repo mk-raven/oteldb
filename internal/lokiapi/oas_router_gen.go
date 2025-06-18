@@ -50,6 +50,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch elem[0] {
 		case '/': // Prefix: "/loki/api/v1/"
+
 			if l := len("/loki/api/v1/"); len(elem) >= l && elem[0:l] == "/loki/api/v1/" {
 				elem = elem[l:]
 			} else {
@@ -61,6 +62,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			switch elem[0] {
 			case 'i': // Prefix: "index/stats"
+
 				if l := len("index/stats"); len(elem) >= l && elem[0:l] == "index/stats" {
 					elem = elem[l:]
 				} else {
@@ -78,7 +80,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 					return
 				}
+
 			case 'l': // Prefix: "label"
+
 				if l := len("label"); len(elem) >= l && elem[0:l] == "label" {
 					elem = elem[l:]
 				} else {
@@ -90,6 +94,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				switch elem[0] {
 				case '/': // Prefix: "/"
+
 					if l := len("/"); len(elem) >= l && elem[0:l] == "/" {
 						elem = elem[l:]
 					} else {
@@ -110,6 +115,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 					switch elem[0] {
 					case '/': // Prefix: "/values"
+
 						if l := len("/values"); len(elem) >= l && elem[0:l] == "/values" {
 							elem = elem[l:]
 						} else {
@@ -129,8 +135,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 							return
 						}
+
 					}
+
 				case 's': // Prefix: "s"
+
 					if l := len("s"); len(elem) >= l && elem[0:l] == "s" {
 						elem = elem[l:]
 					} else {
@@ -148,8 +157,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 						return
 					}
+
 				}
+
 			case 'p': // Prefix: "push"
+
 				if l := len("push"); len(elem) >= l && elem[0:l] == "push" {
 					elem = elem[l:]
 				} else {
@@ -167,7 +179,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 					return
 				}
+
 			case 'q': // Prefix: "query"
+
 				if l := len("query"); len(elem) >= l && elem[0:l] == "query" {
 					elem = elem[l:]
 				} else {
@@ -186,6 +200,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				switch elem[0] {
 				case '_': // Prefix: "_range"
+
 					if l := len("_range"); len(elem) >= l && elem[0:l] == "_range" {
 						elem = elem[l:]
 					} else {
@@ -203,8 +218,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 						return
 					}
+
 				}
+
 			case 's': // Prefix: "series"
+
 				if l := len("series"); len(elem) >= l && elem[0:l] == "series" {
 					elem = elem[l:]
 				} else {
@@ -222,7 +240,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 					return
 				}
+
 			}
+
 		}
 	}
 	s.notFound(w, r)
@@ -304,6 +324,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 		}
 		switch elem[0] {
 		case '/': // Prefix: "/loki/api/v1/"
+
 			if l := len("/loki/api/v1/"); len(elem) >= l && elem[0:l] == "/loki/api/v1/" {
 				elem = elem[l:]
 			} else {
@@ -315,6 +336,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 			}
 			switch elem[0] {
 			case 'i': // Prefix: "index/stats"
+
 				if l := len("index/stats"); len(elem) >= l && elem[0:l] == "index/stats" {
 					elem = elem[l:]
 				} else {
@@ -322,10 +344,10 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 				}
 
 				if len(elem) == 0 {
+					// Leaf node.
 					switch method {
 					case "GET":
-						// Leaf: IndexStats
-						r.name = "IndexStats"
+						r.name = IndexStatsOperation
 						r.summary = ""
 						r.operationID = "indexStats"
 						r.pathPattern = "/loki/api/v1/index/stats"
@@ -336,7 +358,9 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 						return
 					}
 				}
+
 			case 'l': // Prefix: "label"
+
 				if l := len("label"); len(elem) >= l && elem[0:l] == "label" {
 					elem = elem[l:]
 				} else {
@@ -348,6 +372,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 				}
 				switch elem[0] {
 				case '/': // Prefix: "/"
+
 					if l := len("/"); len(elem) >= l && elem[0:l] == "/" {
 						elem = elem[l:]
 					} else {
@@ -368,6 +393,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 					}
 					switch elem[0] {
 					case '/': // Prefix: "/values"
+
 						if l := len("/values"); len(elem) >= l && elem[0:l] == "/values" {
 							elem = elem[l:]
 						} else {
@@ -375,10 +401,10 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 						}
 
 						if len(elem) == 0 {
+							// Leaf node.
 							switch method {
 							case "GET":
-								// Leaf: LabelValues
-								r.name = "LabelValues"
+								r.name = LabelValuesOperation
 								r.summary = ""
 								r.operationID = "labelValues"
 								r.pathPattern = "/loki/api/v1/label/{name}/values"
@@ -389,8 +415,11 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 								return
 							}
 						}
+
 					}
+
 				case 's': // Prefix: "s"
+
 					if l := len("s"); len(elem) >= l && elem[0:l] == "s" {
 						elem = elem[l:]
 					} else {
@@ -398,10 +427,10 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 					}
 
 					if len(elem) == 0 {
+						// Leaf node.
 						switch method {
 						case "GET":
-							// Leaf: Labels
-							r.name = "Labels"
+							r.name = LabelsOperation
 							r.summary = ""
 							r.operationID = "labels"
 							r.pathPattern = "/loki/api/v1/labels"
@@ -412,8 +441,11 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 							return
 						}
 					}
+
 				}
+
 			case 'p': // Prefix: "push"
+
 				if l := len("push"); len(elem) >= l && elem[0:l] == "push" {
 					elem = elem[l:]
 				} else {
@@ -421,10 +453,10 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 				}
 
 				if len(elem) == 0 {
+					// Leaf node.
 					switch method {
 					case "POST":
-						// Leaf: Push
-						r.name = "Push"
+						r.name = PushOperation
 						r.summary = ""
 						r.operationID = "push"
 						r.pathPattern = "/loki/api/v1/push"
@@ -435,7 +467,9 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 						return
 					}
 				}
+
 			case 'q': // Prefix: "query"
+
 				if l := len("query"); len(elem) >= l && elem[0:l] == "query" {
 					elem = elem[l:]
 				} else {
@@ -445,7 +479,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 				if len(elem) == 0 {
 					switch method {
 					case "GET":
-						r.name = "Query"
+						r.name = QueryOperation
 						r.summary = ""
 						r.operationID = "query"
 						r.pathPattern = "/loki/api/v1/query"
@@ -458,6 +492,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 				}
 				switch elem[0] {
 				case '_': // Prefix: "_range"
+
 					if l := len("_range"); len(elem) >= l && elem[0:l] == "_range" {
 						elem = elem[l:]
 					} else {
@@ -465,10 +500,10 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 					}
 
 					if len(elem) == 0 {
+						// Leaf node.
 						switch method {
 						case "GET":
-							// Leaf: QueryRange
-							r.name = "QueryRange"
+							r.name = QueryRangeOperation
 							r.summary = ""
 							r.operationID = "queryRange"
 							r.pathPattern = "/loki/api/v1/query_range"
@@ -479,8 +514,11 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 							return
 						}
 					}
+
 				}
+
 			case 's': // Prefix: "series"
+
 				if l := len("series"); len(elem) >= l && elem[0:l] == "series" {
 					elem = elem[l:]
 				} else {
@@ -488,10 +526,10 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 				}
 
 				if len(elem) == 0 {
+					// Leaf node.
 					switch method {
 					case "GET":
-						// Leaf: Series
-						r.name = "Series"
+						r.name = SeriesOperation
 						r.summary = ""
 						r.operationID = "series"
 						r.pathPattern = "/loki/api/v1/series"
@@ -502,7 +540,9 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 						return
 					}
 				}
+
 			}
+
 		}
 	}
 	return r, false

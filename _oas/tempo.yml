@@ -1,13 +1,24 @@
 openapi: 3.0.3
 info:
   title: Grafana Tempo 'query-frontend' API
-  version: 2.1.0
+  version: 2.4.0
 externalDocs:
   description: Tempo API reference
   url: https://grafana.com/docs/tempo/latest/api_docs
 servers:
   - url: "http://localhost:3200"
 paths:
+  /api/status/buildinfo:
+    get:
+      operationId: buildInfo
+      description: |
+        Returns Tempo buildinfo, in the same format as Prometheus `/api/v1/status/buildinfo`.
+        Used by Grafana to check Tempo API version.
+      responses:
+        200:
+          $ref: "#/components/responses/BuildInfo"
+        default:
+          $ref: "#/components/responses/Error"
   /api/echo:
     get:
       operationId: echo
@@ -22,6 +33,7 @@ paths:
                 example: echo
         default:
           $ref: "#/components/responses/Error"
+
   /api/traces/{traceID}:
     get:
       operationId: traceByID
@@ -33,12 +45,14 @@ paths:
           schema:
             type: string
           description: TraceID to query.
+
         - name: start
           in: query
           schema:
             type: integer
             format: unix-seconds
           description: Along with `end` define a time range from which traces should be returned.
+
         - name: end
           in: query
           schema:
@@ -50,6 +64,12 @@ paths:
             If the parameters are not provided then Tempo will check for the trace across all blocks in backend.
             If the parameters are provided, it will only check in the blocks within the specified time range,
             this can result in trace not being found or partial results if it does not fall in the specified time range.
+
+        - name: Accept
+          in: header
+          required: true
+          schema:
+            type: string
       responses:
         200:
           $ref: "#/components/responses/TraceByID"
@@ -116,6 +136,13 @@ paths:
             Providing both `start` and `end` will change the way that Tempo searches.
             If the parameters are not provided, then Tempo will search the recent trace data stored in the ingesters.
             If the parameters are provided, it will search the backend as well.
+
+        - name: spss
+          in: query
+          schema:
+            type: integer
+          description: |
+            Limit the number of spans per span-set. Default value is 3.
       responses:
         200:
           $ref: "#/components/responses/Search"
@@ -126,6 +153,30 @@ paths:
     get:
       operationId: searchTags
       description: This endpoint retrieves all discovered tag names that can be used in search.
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            $ref: "#/components/schemas/TagScope"
+          description: |
+            Specifies the scope of the tags, this is an optional parameter, if not specified it means all scopes.
+
+        - name: start
+          in: query
+          schema:
+            type: integer
+            format: unix-seconds
+          description: |
+            Along with `end` define a time range from which tags should be returned.
+
+        - name: end
+          in: query
+          schema:
+            type: integer
+            format: unix-seconds
+          description: |
+            Along with `start` define a time range from which tags should be returned.
+            Providing both `start` and `end` includes blocks for the specified time range only.
       responses:
         200:
           $ref: "#/components/responses/SearchTags"
@@ -143,26 +194,120 @@ paths:
           schema:
             type: string
           description: Tag name.
+
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: |
+            If provided, the tag values returned by the API are filtered to only return values seen on spans matching your filter parameters.
+            Queries can be incomplete: for example, `{ .cluster = }`. Tempo extracts only the valid matchers and build a valid query.
+
+            Only queries with a single selector `{}`` and AND `&&` operators are supported.
+
+            - Example supported: `{ .cluster = "us-east-1" && .service = "frontend" }`
+            - Example unsupported: `{ .cluster = "us-east-1" || .service = "frontend" } && { .cluster = "us-east-2" }`
+
+        - name: start
+          in: query
+          schema:
+            type: integer
+            format: unix-seconds
+          description: |
+            Along with `end` define a time range from which tags should be returned.
+
+        - name: end
+          in: query
+          schema:
+            type: integer
+            format: unix-seconds
+          description: |
+            Along with `start` define a time range from which tags should be returned.
+            Providing both `start` and `end` includes blocks for the specified time range only.
       responses:
         200:
           $ref: "#/components/responses/SearchTagValues"
         default:
           $ref: "#/components/responses/Error"
 
-  /api/v2/search/tag/{tag_name}/values:
+  /api/v2/search/tag/{attribute_selector}/values:
     get:
       operationId: searchTagValuesV2
       description: This endpoint retrieves all discovered values and their data types for the given TraceQL identifier.
       parameters:
-        - name: tag_name
+        - name: attribute_selector
           in: path
           required: true
           schema:
             type: string
-          description: Tag name.
+          description: TraceQL attribute selector (`.service.name`, `resource.service.name`, etc.).
+
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: |
+            If provided, the tag values returned by the API are filtered to only return values seen on spans matching your filter parameters.
+            Queries can be incomplete: for example, `{ .cluster = }`. Tempo extracts only the valid matchers and build a valid query.
+
+            Only queries with a single selector `{}`` and AND `&&` operators are supported.
+
+            - Example supported: `{ .cluster = "us-east-1" && .service = "frontend" }`
+            - Example unsupported: `{ .cluster = "us-east-1" || .service = "frontend" } && { .cluster = "us-east-2" }`
+
+        - name: start
+          in: query
+          schema:
+            type: integer
+            format: unix-seconds
+          description: |
+            Along with `end` define a time range from which tags should be returned.
+
+        - name: end
+          in: query
+          schema:
+            type: integer
+            format: unix-seconds
+          description: |
+            Along with `start` define a time range from which tags should be returned.
+            Providing both `start` and `end` includes blocks for the specified time range only.
       responses:
         200:
           $ref: "#/components/responses/SearchTagValuesV2"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/v2/search/tags:
+    get:
+      operationId: searchTagsV2
+      description: This endpoint retrieves all discovered tag names that can be used in search.
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            $ref: "#/components/schemas/TagScope"
+          description: |
+            Specifies the scope of the tags, this is an optional parameter, if not specified it means all scopes.
+
+        - name: start
+          in: query
+          schema:
+            type: integer
+            format: unix-seconds
+          description: |
+            Along with `end` define a time range from which tags should be returned.
+
+        - name: end
+          in: query
+          schema:
+            type: integer
+            format: unix-seconds
+          description: |
+            Along with `start` define a time range from which tags should be returned.
+            Providing both `start` and `end` includes blocks for the specified time range only.
+      responses:
+        200:
+          $ref: "#/components/responses/SearchTagsV2"
         default:
           $ref: "#/components/responses/Error"
 
@@ -174,6 +319,12 @@ components:
         "application/json":
           schema:
             $ref: "#/components/schemas/Error"
+    BuildInfo:
+      description: Prometheus version JSON.
+      content:
+        "application/json":
+          schema:
+            $ref: "#/components/schemas/PrometheusVersion"
     TraceByID:
       description: Query by trace ID result
       content:
@@ -201,6 +352,12 @@ components:
         "application/json":
           schema:
             $ref: "#/components/schemas/TagValues"
+    SearchTagsV2:
+      description: Search tags result
+      content:
+        "application/json":
+          schema:
+            $ref: "#/components/schemas/TagNamesV2"
     SearchTagValuesV2:
       description: Search tag values result
       content:
@@ -354,6 +511,24 @@ components:
           items:
             type: string
 
+    TagNamesV2:
+      type: object
+      properties:
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScopeTags"
+    ScopeTags:
+      type: object
+      required: [name]
+      properties:
+        name:
+          $ref: "#/components/schemas/TagScope"
+        tags:
+          type: array
+          items:
+            type: string
+
     TagValuesV2:
       type: object
       properties:
@@ -370,6 +545,37 @@ components:
           # TODO(tdakkota): use enum?
           type: string
         value:
+          type: string
+
+    TagScope:
+      type: string
+      enum:
+        - "span"
+        - "resource"
+        - "intrinsic"
+        - "none"
+
+    PrometheusVersion:
+      type: object
+      required:
+        - version
+        - revision
+        - branch
+        - buildUser
+        - buildDate
+        - goVersion
+      properties:
+        version:
+          type: string
+        revision:
+          type: string
+        branch:
+          type: string
+        buildUser:
+          type: string
+        buildDate:
+          type: string
+        goVersion:
           type: string
 
     Error:

@@ -1,21 +1,58 @@
+//go:build !prometheusremotewrite_prometheus_prompb
+
 package prometheusremotewrite
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/prometheus/prometheus/prompb"
+	"github.com/go-faster/sdk/gold"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.uber.org/zap"
+
+	"github.com/go-faster/oteldb/internal/otelbench"
+	"github.com/go-faster/oteldb/internal/prompb"
 )
 
 var (
 	now       = time.Now()
 	nowMillis = now.UnixNano() / int64(time.Millisecond)
 )
+
+func TestFromTimeSeries(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "reqs-1k-zstd.rwq"))
+	require.NoError(t, err)
+	reader := otelbench.NewReader(bytes.NewReader(data))
+	require.True(t, reader.Decode())
+	compressed := reader.Data()
+	z, err := zstd.NewReader(bytes.NewReader(compressed))
+	require.NoError(t, err)
+	raw, err := io.ReadAll(z)
+	require.NoError(t, err)
+
+	rw := &prompb.WriteRequest{}
+	require.NoError(t, rw.Unmarshal(raw))
+
+	series, err := FromTimeSeries(rw.Timeseries, Settings{TimeThreshold: 1_000_000})
+	require.NoError(t, err)
+
+	var jm pmetric.JSONMarshaler
+	jsonData, err := jm.MarshalMetrics(series)
+	require.NoError(t, err)
+	dst := new(bytes.Buffer)
+	require.NoError(t, json.Indent(dst, jsonData, "", " "))
+	gold.Str(t, dst.String(), "series.json")
+}
 
 func TestPrwConfig_FromTimeSeries(t *testing.T) {
 	type args struct {
@@ -39,12 +76,12 @@ func TestPrwConfig_FromTimeSeries(t *testing.T) {
 					{
 						Labels: []prompb.Label{
 							{
-								Name:  nameStr,
-								Value: value71,
+								Name:  []byte(nameStr),
+								Value: []byte(value71),
 							},
 							{
-								Name:  label12,
-								Value: value12,
+								Name:  []byte(label12),
+								Value: []byte(value12),
 							},
 						},
 						Samples: []prompb.Sample{
@@ -72,12 +109,12 @@ func TestPrwConfig_FromTimeSeries(t *testing.T) {
 					{
 						Labels: []prompb.Label{
 							{
-								Name:  nameStr,
-								Value: value61,
+								Name:  []byte(nameStr),
+								Value: []byte(value61),
 							},
 							{
-								Name:  label12,
-								Value: value12,
+								Name:  []byte(label12),
+								Value: []byte(value12),
 							},
 						},
 						Samples: []prompb.Sample{
@@ -105,12 +142,12 @@ func TestPrwConfig_FromTimeSeries(t *testing.T) {
 					{
 						Labels: []prompb.Label{
 							{
-								Name:  nameStr,
-								Value: value81,
+								Name:  []byte(nameStr),
+								Value: []byte(value81),
 							},
 							{
-								Name:  label12,
-								Value: value12,
+								Name:  []byte(label12),
+								Value: []byte(value12),
 							},
 						},
 						Samples: []prompb.Sample{{Value: 2.0, Timestamp: nowMillis}},
@@ -131,12 +168,12 @@ func TestPrwConfig_FromTimeSeries(t *testing.T) {
 					{
 						Labels: []prompb.Label{
 							{
-								Name:  nameStr,
-								Value: value91,
+								Name:  []byte(nameStr),
+								Value: []byte(value91),
 							},
 							{
-								Name:  label12,
-								Value: value12,
+								Name:  []byte(label12),
+								Value: []byte(value12),
 							},
 						},
 						Samples: []prompb.Sample{{Value: 2.0, Timestamp: nowMillis}},
@@ -160,12 +197,12 @@ func TestPrwConfig_FromTimeSeries(t *testing.T) {
 					{
 						Labels: []prompb.Label{
 							{
-								Name:  nameStr,
-								Value: value61,
+								Name:  []byte(nameStr),
+								Value: []byte(value61),
 							},
 							{
-								Name:  label12,
-								Value: value12,
+								Name:  []byte(label12),
+								Value: []byte(value12),
 							},
 						},
 						Samples: []prompb.Sample{{Value: 0.0, Timestamp: now.Add(-time.Hour*24).UnixNano() / int64(time.Millisecond)}},
@@ -242,8 +279,8 @@ func Test_finalName(t *testing.T) {
 			args: args{
 				labels: []prompb.Label{
 					{
-						Name:  nameStr,
-						Value: "foo",
+						Name:  []byte(nameStr),
+						Value: []byte("foo"),
 					},
 				},
 			},
@@ -255,8 +292,8 @@ func Test_finalName(t *testing.T) {
 			args: args{
 				labels: []prompb.Label{
 					{
-						Name:  "foo",
-						Value: "bar",
+						Name:  []byte("foo"),
+						Value: []byte("bar"),
 					},
 				},
 			},

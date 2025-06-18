@@ -40,8 +40,8 @@ func (opts *DialOptions) setDefaults() {
 	}
 }
 
-// Dial makes a connection pool using given DSN.
-func Dial(ctx context.Context, dsn string, opts DialOptions) (*chpool.Pool, error) {
+// Dial creates new [ClickhouseClient] using given DSN.
+func Dial(ctx context.Context, dsn string, opts DialOptions) (ClickhouseClient, error) {
 	opts.setDefaults()
 	lg := opts.Logger
 
@@ -49,6 +49,7 @@ func Dial(ctx context.Context, dsn string, opts DialOptions) (*chpool.Pool, erro
 	if err != nil {
 		return nil, errors.Wrap(err, "parse DSN")
 	}
+	lg.Debug("Dial Clickhouse", zap.String("dsn", dsn))
 
 	pass, _ := u.User.Password()
 	chLogger := lg.Named("ch")
@@ -80,12 +81,22 @@ func Dial(ctx context.Context, dsn string, opts DialOptions) (*chpool.Pool, erro
 	connectBackoff.InitialInterval = 2 * time.Second
 	connectBackoff.MaxElapsedTime = time.Minute
 	return backoff.RetryNotifyWithData(
-		func() (*chpool.Pool, error) {
-			return chpool.Dial(ctx, chpool.Options{
-				ClientOptions: chOpts,
+		func() (ClickhouseClient, error) {
+			client, err := chpool.Dial(ctx, chpool.Options{
+				ClientOptions:     chOpts,
+				HealthCheckPeriod: time.Second,
+				MaxConnIdleTime:   time.Second * 10,
+				MaxConnLifetime:   time.Minute,
 			})
+			if err != nil {
+				return nil, errors.Wrap(err, "dial")
+			}
+			if err := client.Ping(ctx); err != nil {
+				return nil, errors.Wrap(err, "ping")
+			}
+			return client, nil
 		},
-		connectBackoff,
+		backoff.WithContext(connectBackoff, ctx),
 		func(err error, d time.Duration) {
 			lg.Warn("Clickhouse dial failed",
 				zap.Error(err),

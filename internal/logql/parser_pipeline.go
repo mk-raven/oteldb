@@ -6,13 +6,14 @@ import (
 	"github.com/go-faster/errors"
 
 	"github.com/go-faster/oteldb/internal/logql/lexer"
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlpattern"
 )
 
 func (p *parser) parsePipeline(allowUnwrap bool) (stages []PipelineStage, err error) {
 	for {
 		switch t := p.peek(); t.Type {
-		case lexer.PipeExact, lexer.PipeMatch, lexer.NotEq, lexer.NotRe: // ( "|=" | "|~" | "!=" | "!~" )
-			lf, err := p.parseLineFilter()
+		case lexer.PipeExact, lexer.PipeMatch, lexer.NotEq, lexer.NotRe, lexer.PipePattern, lexer.NotPipePattern: // ( "|=" | "|~" | "!=" | "!~" | "|>" | "!>")
+			lf, err := p.parseLineFilters()
 			if err != nil {
 				return stages, err
 			}
@@ -28,11 +29,20 @@ func (p *parser) parsePipeline(allowUnwrap bool) (stages []PipelineStage, err er
 				}
 				stages = append(stages, &JSONExpressionParser{Labels: labels, Exprs: exprs})
 			case lexer.Logfmt:
+				flags, err := p.parseLogfmtFlags()
+				if err != nil {
+					return stages, err
+				}
+
 				labels, exprs, err := p.parseLabelExtraction()
 				if err != nil {
 					return stages, err
 				}
-				stages = append(stages, &LogfmtExpressionParser{Labels: labels, Exprs: exprs})
+				stages = append(stages, &LogfmtExpressionParser{
+					Labels: labels,
+					Exprs:  exprs,
+					Flags:  flags,
+				})
 			case lexer.Regexp:
 				p, err := p.parseRegexpLabelParser()
 				if err != nil {
@@ -40,12 +50,18 @@ func (p *parser) parsePipeline(allowUnwrap bool) (stages []PipelineStage, err er
 				}
 				stages = append(stages, p)
 			case lexer.Pattern:
-				pattern, err := p.parseString()
+				pattern, patternTok, err := p.consumeText(lexer.String)
 				if err != nil {
 					return stages, err
 				}
-				// FIXME(tdakkota): parse pattern?
-				stages = append(stages, &PatternLabelParser{Pattern: pattern})
+				compiled, err := logqlpattern.Parse(pattern, logqlpattern.ExtractorFlags)
+				if err != nil {
+					return nil, &ParseError{
+						Pos: patternTok.Pos,
+						Err: errors.Wrap(err, "pattern"),
+					}
+				}
+				stages = append(stages, &PatternLabelParser{Pattern: compiled})
 			case lexer.Unpack:
 				stages = append(stages, &UnpackLabelParser{})
 			case lexer.LineFormat:
@@ -108,7 +124,7 @@ func (p *parser) parsePipeline(allowUnwrap bool) (stages []PipelineStage, err er
 	}
 }
 
-func (p *parser) parseLineFilter() (f *LineFilter, err error) {
+func (p *parser) parseLineFilters() (f *LineFilter, err error) {
 	t := p.next()
 
 	f = new(LineFilter)
@@ -121,50 +137,103 @@ func (p *parser) parseLineFilter() (f *LineFilter, err error) {
 		f.Op = OpNotEq
 	case lexer.NotRe: // "!~"
 		f.Op = OpNotRe
+	case lexer.PipePattern: // "|>"
+		f.Op = OpPattern
+	case lexer.NotPipePattern: // "!>"
+		f.Op = OpNotPattern
 	default:
-		return nil, p.unexpectedToken(t)
+		return f, p.unexpectedToken(t)
 	}
 
+	f.By, err = p.parseLineFilterValue(f.Op)
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		if t := p.peek(); t.Type != lexer.Or {
+			return f, nil
+		}
+		p.next()
+
+		sub, err := p.parseLineFilterValue(f.Op)
+		if err != nil {
+			return nil, err
+		}
+		f.Or = append(f.Or, sub)
+	}
+}
+
+func (p *parser) parseLineFilterValue(op BinOp) (f LineFilterValue, err error) {
 	switch t := p.peek(); t.Type {
 	case lexer.String:
 		f.Value, err = p.parseString()
 		if err != nil {
-			return nil, err
+			return f, err
 		}
 
-		switch f.Op {
+		// TODO(tdakkota): validate pattern too?
+		// 	pattern parser is a part of engine for now
+		switch op {
 		case OpRe, OpNotRe:
 			f.Re, err = regexp.Compile(f.Value)
 			if err != nil {
-				return nil, errors.Wrapf(err, "invalid regex in line filter %q", f.Value)
+				return f, &ParseError{
+					Pos: t.Pos,
+					Err: err,
+				}
 			}
 		}
 	case lexer.IP:
 		p.next()
 
-		switch f.Op {
+		switch op {
 		case OpEq, OpNotEq:
 		default:
-			return nil, errors.Errorf("invalid IP line filter operation %q", f.Op)
+			return f, &ParseError{
+				Pos: t.Pos,
+				Err: errors.Errorf("invalid IP line filter operation %q", op),
+			}
 		}
 
 		if err := p.consume(lexer.OpenParen); err != nil {
-			return nil, err
+			return f, err
 		}
 
 		f.Value, err = p.parseString()
 		if err != nil {
-			return nil, err
+			return f, err
 		}
 		f.IP = true
 
 		if err := p.consume(lexer.CloseParen); err != nil {
-			return nil, err
+			return f, err
 		}
 	default:
-		return nil, p.unexpectedToken(t)
+		return f, p.unexpectedToken(t)
 	}
 	return f, nil
+}
+
+func (p *parser) parseLogfmtFlags() (flags LogfmtFlags, _ error) {
+	for {
+		t := p.peek()
+		if t.Type != lexer.ParserFlag {
+			return flags, nil
+		}
+		switch t.Text {
+		case "--strict":
+			flags.Set(LogfmtFlagStrict)
+		case "--keep-empty":
+			flags.Set(LogfmtFlagKeepEmpty)
+		default:
+			return flags, &ParseError{
+				Pos: t.Pos,
+				Err: errors.Errorf("unknown parser flag %q", t.Text),
+			}
+		}
+		p.next()
+	}
 }
 
 func (p *parser) parseLabelExtraction() (labels []Label, exprs []LabelExtractionExpr, err error) {
@@ -211,33 +280,58 @@ func (p *parser) parseLabelExtraction() (labels []Label, exprs []LabelExtraction
 }
 
 func (p *parser) parseRegexpLabelParser() (*RegexpLabelParser, error) {
-	pattern, err := p.parseString()
+	pattern, patternTok, err := p.consumeText(lexer.String)
 	if err != nil {
 		return nil, err
 	}
 
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return nil, errors.Wrapf(err, "invalid regex in regexp stage %q", pattern)
+		return nil, &ParseError{
+			Pos: patternTok.Pos,
+			Err: err,
+		}
+	}
+	if re.NumSubexp() == 0 {
+		return nil, &ParseError{
+			Pos: patternTok.Pos,
+			Err: errors.New("at least one capture expected"),
+		}
 	}
 
-	mapping := map[int]Label{}
-	unique := map[string]struct{}{}
-	for i, name := range re.SubexpNames() {
+	var (
+		captures = re.SubexpNames()
+		mapping  = make(map[int]Label, len(captures))
+		unique   = make(map[string]struct{}, len(captures))
+	)
+
+	for i, name := range captures {
 		// Not capturing.
 		if name == "" {
 			continue
 		}
 
 		if _, ok := unique[name]; ok {
-			return nil, errors.Wrapf(err, "duplicate capture %q", name)
+			return nil, &ParseError{
+				Pos: patternTok.Pos,
+				Err: errors.Errorf("duplicate capture %q", name),
+			}
 		}
 		unique[name] = struct{}{}
 
 		if err := IsValidLabel(name, p.allowDots); err != nil {
-			return nil, errors.Wrapf(err, "invalid label name %q", name)
+			return nil, &ParseError{
+				Pos: patternTok.Pos,
+				Err: errors.Errorf("invalid label name %q", name),
+			}
 		}
 		mapping[i] = Label(name)
+	}
+	if len(mapping) == 0 {
+		return nil, &ParseError{
+			Pos: patternTok.Pos,
+			Err: errors.New("at least one capture expected"),
+		}
 	}
 
 	return &RegexpLabelParser{
@@ -247,6 +341,14 @@ func (p *parser) parseRegexpLabelParser() (*RegexpLabelParser, error) {
 }
 
 func (p *parser) parseLabelPredicate() (pred LabelPredicate, _ error) {
+	expr, err := p.parseLabelPredicate1()
+	if err != nil {
+		return nil, err
+	}
+	return p.parseLabelPredicateBinOp(expr)
+}
+
+func (p *parser) parseLabelPredicate1() (LabelPredicate, error) {
 	switch t := p.next(); t.Type {
 	case lexer.OpenParen:
 		lp, err := p.parseLabelPredicate()
@@ -257,7 +359,7 @@ func (p *parser) parseLabelPredicate() (pred LabelPredicate, _ error) {
 			return nil, err
 		}
 
-		pred = &LabelPredicateParen{X: lp}
+		return &LabelPredicateParen{X: lp}, nil
 	case lexer.Ident:
 		var op BinOp
 
@@ -290,7 +392,10 @@ func (p *parser) parseLabelPredicate() (pred LabelPredicate, _ error) {
 			switch opTok.Type {
 			case lexer.Eq, lexer.NotEq, lexer.Re, lexer.NotRe:
 			default:
-				return nil, errors.Errorf("invalid operation %q", opTok.Type)
+				return nil, &ParseError{
+					Pos: opTok.Pos,
+					Err: errors.Errorf("invalid string operator %q", opTok.Type),
+				}
 			}
 
 			v, err := p.parseString()
@@ -303,51 +408,66 @@ func (p *parser) parseLabelPredicate() (pred LabelPredicate, _ error) {
 			case OpRe, OpNotRe:
 				re, err = compileLabelRegex(v)
 				if err != nil {
-					return nil, errors.Wrapf(err, "invalid regex in label matcher predicate %q", v)
+					return nil, &ParseError{
+						Pos: literalTok.Pos,
+						Err: err,
+					}
 				}
 			}
-			pred = &LabelMatcher{Label: Label(t.Text), Op: op, Value: v, Re: re}
+			return &LabelMatcher{Label: Label(t.Text), Op: op, Value: v, Re: re}, nil
 		case lexer.Number:
 			switch opTok.Type {
 			case lexer.CmpEq, lexer.NotEq, lexer.Lt, lexer.Lte, lexer.Gt, lexer.Gte:
 			default:
-				return nil, errors.Errorf("invalid operation %q", opTok.Type)
+				return nil, &ParseError{
+					Pos: opTok.Pos,
+					Err: errors.Errorf("invalid number operator %q", opTok.Type),
+				}
 			}
 
 			v, err := p.parseNumber()
 			if err != nil {
 				return nil, err
 			}
-			pred = &NumberFilter{Label: Label(t.Text), Op: op, Value: v}
+			return &NumberFilter{Label: Label(t.Text), Op: op, Value: v}, nil
 		case lexer.Duration:
 			switch opTok.Type {
 			case lexer.CmpEq, lexer.NotEq, lexer.Lt, lexer.Lte, lexer.Gt, lexer.Gte:
 			default:
-				return nil, errors.Errorf("invalid operation %q", opTok.Type)
+				return nil, &ParseError{
+					Pos: opTok.Pos,
+					Err: errors.Errorf("invalid duration operator %q", opTok.Type),
+				}
 			}
 
 			d, err := p.parseDuration()
 			if err != nil {
 				return nil, err
 			}
-			pred = &DurationFilter{Label: Label(t.Text), Op: op, Value: d}
+			return &DurationFilter{Label: Label(t.Text), Op: op, Value: d}, nil
 		case lexer.Bytes:
 			switch opTok.Type {
 			case lexer.CmpEq, lexer.NotEq, lexer.Lt, lexer.Lte, lexer.Gt, lexer.Gte:
 			default:
-				return nil, errors.Errorf("invalid operation %q", opTok.Type)
+				return nil, &ParseError{
+					Pos: opTok.Pos,
+					Err: errors.Errorf("invalid bytes operator %q", opTok.Type),
+				}
 			}
 
 			b, err := p.parseBytes()
 			if err != nil {
 				return nil, err
 			}
-			pred = &BytesFilter{Label: Label(t.Text), Op: op, Value: b}
+			return &BytesFilter{Label: Label(t.Text), Op: op, Value: b}, nil
 		case lexer.IP:
 			switch opTok.Type {
-			case lexer.CmpEq, lexer.NotEq:
+			case lexer.Eq, lexer.NotEq:
 			default:
-				return nil, errors.Errorf("invalid operation %q", opTok.Type)
+				return nil, &ParseError{
+					Pos: opTok.Pos,
+					Err: errors.Errorf("invalid IP operator %q", opTok.Type),
+				}
 			}
 			// Read "ip" token.
 			p.next()
@@ -365,36 +485,42 @@ func (p *parser) parseLabelPredicate() (pred LabelPredicate, _ error) {
 				return nil, err
 			}
 
-			pred = &IPFilter{Label: Label(t.Text), Op: op, Value: ipPattern}
+			return &IPFilter{Label: Label(t.Text), Op: op, Value: ipPattern}, nil
 		default:
 			return nil, p.unexpectedToken(literalTok)
 		}
-
 	default:
 		return nil, p.unexpectedToken(t)
 	}
+}
 
-	var binOp BinOp
-	switch nextTok := p.next(); nextTok.Type {
-	case lexer.Ident:
-		p.unread()
-		binOp = OpAnd
-	case lexer.Comma, lexer.And:
-		binOp = OpAnd
-	case lexer.Or:
-		binOp = OpOr
-	case lexer.EOF:
-		return pred, nil
-	default:
-		p.unread()
-		return pred, nil
-	}
+func (p *parser) parseLabelPredicateBinOp(left LabelPredicate) (LabelPredicate, error) {
+	for {
+		var op BinOp
+		switch tok := p.peek(); tok.Type {
+		case lexer.Ident:
+			op = OpAnd
+		case lexer.Comma, lexer.And:
+			p.next()
+			op = OpAnd
+		case lexer.Or:
+			p.next()
+			op = OpOr
+		case lexer.EOF:
+			p.next()
+			return left, nil
+		default:
+			return left, nil
+		}
+		// Note: OpAnd and OpOr have equal precedence, unlike metric binary operations.
 
-	right, err := p.parseLabelPredicate()
-	if err != nil {
-		return nil, err
+		right, err := p.parseLabelPredicate1()
+		if err != nil {
+			return nil, err
+		}
+
+		left = &LabelPredicateBinOp{Left: left, Op: op, Right: right}
 	}
-	return &LabelPredicateBinOp{Left: pred, Op: binOp, Right: right}, nil
 }
 
 func (p *parser) parseLabelFormatExpr() (lf *LabelFormatExpr, err error) {
@@ -409,7 +535,10 @@ func (p *parser) parseLabelFormatExpr() (lf *LabelFormatExpr, err error) {
 		label := Label(value)
 
 		if _, ok := labels[label]; ok {
-			return nil, errors.Errorf("label %q can be formatted only once per stage: at %s", label, token.Pos)
+			return nil, &ParseError{
+				Pos: token.Pos,
+				Err: errors.Errorf("label %q can be formatted only once per stage", label),
+			}
 		}
 		labels[label] = struct{}{}
 
@@ -423,7 +552,7 @@ func (p *parser) parseLabelFormatExpr() (lf *LabelFormatExpr, err error) {
 			if err != nil {
 				return nil, err
 			}
-			lf.Labels = append(lf.Labels, RenameLabel{Label: label, To: value})
+			lf.Labels = append(lf.Labels, RenameLabel{To: label, From: value})
 		case lexer.String:
 			value, err := p.parseString()
 			if err != nil {

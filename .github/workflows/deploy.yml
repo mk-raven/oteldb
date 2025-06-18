@@ -8,12 +8,13 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_TAG: ghcr.io/${{ github.repository }}
-  KUBECTL_VERSION: v1.27.1
+  KUBECTL_VERSION: v1.29.7
+  DEPLOY_BROKEN: false
 
 jobs:
   oteldb:
     environment: prod
-    runs-on: ubuntu-latest
+    runs-on: [deploy]
     permissions:
       contents: read
       packages: write
@@ -32,7 +33,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.21.x"
+          go-version: "1.23.x"
           cache: false
 
       - name: Get Go environment
@@ -43,7 +44,7 @@ jobs:
           echo "goversion=$(go env GOVERSION)" >> $GITHUB_ENV
 
       - name: Set up cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ${{ env.cache }}
@@ -69,12 +70,12 @@ jobs:
         env:
           CGO_ENABLED: 0
         run: |
-          go build -v ./cmd/oteldb
-          go build -v ./cmd/otelproxy
-          go build -v ./cmd/chotel
+          go build -trimpath -buildvcs=false -v ./cmd/oteldb
+          go build -trimpath -buildvcs=false -v ./cmd/otelproxy
+          go build -trimpath -buildvcs=false -v ./cmd/chotel
 
       - name: Base image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy.Dockerfile
@@ -84,7 +85,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Proxy image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy.proxy.Dockerfile
@@ -94,7 +95,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: ClickHouse OTEL Exporter Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy.chotel.Dockerfile
@@ -107,14 +108,14 @@ jobs:
         run: sed 's/:main/:${{ env.sha }}/g' .k8s/deployment.yml > .k8s/deployment.deploy.yml
 
       - name: Set up kubectl cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: /tmp/kubectl
           key: kubectl-${{ env.KUBECTL_VERSION }}
 
       - name: Check kubectl
         id: "kubectl"
-        uses: andstor/file-existence-action@v2
+        uses: andstor/file-existence-action@v3
         with:
           files: /tmp/kubectl
 
@@ -129,13 +130,24 @@ jobs:
           KUBE: ${{ secrets.KUBE }}
         run: .k8s/kubeconfig.sh
 
+      - uses: azure/setup-helm@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+        id: install
+
       - name: Deploy
+        if: ${{ env.DEPLOY_BROKEN != 'true' }}
         run: |
-          /tmp/kubectl apply -f .k8s/deployment.deploy.yml -f .k8s/service.yaml
-          /tmp/kubectl -n faster rollout status deployment oteldb otelproxy --timeout=1m
+          /tmp/kubectl apply -f .k8s/deployment.deploy.yml
+#          /tmp/kubectl -n faster rollout status deployment otelproxy chotel --timeout=5m
+      - name: Deploy (Helm)
+        if: ${{ env.DEPLOY_BROKEN != 'true' }}
+        run: |
+          helm upgrade --timeout 5m --wait --install otel ./helm/oteldb --namespace faster --values .k8s/values.yml --set image.tag=${{ env.sha }}
+
   otel:
     environment: prod
-    runs-on: ubuntu-latest
+    runs-on: [deploy]
     permissions:
       contents: read
       packages: write
@@ -159,14 +171,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up kubectl cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: /tmp/kubectl
           key: kubectl-${{ env.KUBECTL_VERSION }}
 
       - name: Check kubectl
         id: "kubectl"
-        uses: andstor/file-existence-action@v2
+        uses: andstor/file-existence-action@v3
         with:
           files: /tmp/kubectl
 
@@ -182,7 +194,8 @@ jobs:
         run: .k8s/kubeconfig.sh
 
       - name: Deploy
+        if: ${{ env.DEPLOY_BROKEN != 'true' }}
         run: |
           /tmp/kubectl -n monitoring apply -f .k8s/otel.yml
-          /tmp/kubectl -n monitoring rollout status --timeout=1m deployment otel-collector
-          /tmp/kubectl -n monitoring rollout status --timeout=1m daemonset otel-agent
+          /tmp/kubectl -n monitoring rollout status --timeout=2m deployment otel-collector
+          /tmp/kubectl -n monitoring rollout status --timeout=2m daemonset otel-agent

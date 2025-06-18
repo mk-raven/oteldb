@@ -1,0 +1,34 @@
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    url: http://tempo:3200
+    access: proxy
+    httpMethod: GET
+    jsonData:
+      httpMethod: GET
+
+  - name: "PromQL"
+    type: prometheus
+    access: proxy
+    orgId: 1
+    url: http://otelproxy:9090
+    uid: promoteldb
+    isDefault: true
+
+  - name: ClickHouse
+    type: grafana-clickhouse-datasource
+    uid: clickhouse
+    jsonData:
+      port: 9000
+      server: clickhouse
+      tlsSkipVerify: true
+
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    orgId: 1
+    url: http://prometheus:9090
+    uid: prometheus

@@ -1,0 +1,97 @@
+name: "Benchmark"
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  WORKDIR: dev/local/ch-bench-read
+  COMPOSE_FILE: docker-compose.ci.yml
+  OTEL_EXPORTER_OTLP_INSECURE: "true"
+  CGO_ENABLED: 0
+
+jobs:
+  PromQL:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Docker log in
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/checkout@v4
+
+      - name: Get Go environment
+        id: go-env
+        run: |
+          echo "cache=$(go env GOCACHE)" >> $GITHUB_ENV
+          echo "modcache=$(go env GOMODCACHE)" >> $GITHUB_ENV
+          echo "goversion=$(go env GOVERSION)" >> $GITHUB_ENV
+
+      - name: Set up cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.cache }}
+            ${{ env.modcache }}
+          key: Benchmark-${{ runner.os }}-go-${{ env.goversion }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            Benchmark-${{ runner.os }}-go-${{ env.goversion }}
+
+      - name: Go build
+        env:
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -buildvcs=false -v ./cmd/oteldb
+          go build -trimpath -buildvcs=false -v ./cmd/chotel
+
+      - name: Reset compose
+        working-directory: ${{ env.WORKDIR }}
+        run: docker compose down --remove-orphans --volumes --timeout 10
+
+      - name: Start compose
+        working-directory: ${{ env.WORKDIR }}
+        run: docker compose up -d
+
+      - name: Load data
+        run: |
+          wget https://storage.yandexcloud.net/faster-public/oteldb/req.rwq
+          go run github.com/go-faster/oteldb/cmd/otelbench promrw replay -i req.rwq
+
+      - name: Warmup
+        working-directory: ${{ env.WORKDIR }}
+        run: go run github.com/go-faster/oteldb/cmd/otelbench promql bench -i testdata/node-exporter-selected.promql.yml --warmup 10
+
+      - name: Test
+        working-directory: ${{ env.WORKDIR }}
+        run: go run github.com/go-faster/oteldb/cmd/otelbench promql bench -o report.yml -i testdata/node-exporter-selected.promql.yml --trace --allow-empty=false --warmup 5
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: report.yml
+          path: ${{ env.WORKDIR }}/report.yml
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Analyze report
+        working-directory: ${{ env.WORKDIR }}
+        run: go run github.com/go-faster/oteldb/cmd/otelbench promql analyze -i report.yml
+
+      - name: Cleanup
+        working-directory: ${{ env.WORKDIR }}
+        if: ${{ ! cancelled() }}
+        run: docker compose down --remove-orphans --volumes --timeout 10

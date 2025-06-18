@@ -3,6 +3,7 @@ package lokihandler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -13,18 +14,27 @@ import (
 	"github.com/go-faster/sdk/zctx"
 
 	"github.com/go-faster/oteldb/internal/iterators"
+	"github.com/go-faster/oteldb/internal/logql"
 	"github.com/go-faster/oteldb/internal/logql/logqlengine"
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlerrors"
 	"github.com/go-faster/oteldb/internal/logstorage"
 	"github.com/go-faster/oteldb/internal/lokiapi"
-	"github.com/go-faster/oteldb/internal/otelstorage"
 )
-
-var _ lokiapi.Handler = (*LokiAPI)(nil)
 
 // LokiAPI implements lokiapi.Handler.
 type LokiAPI struct {
 	q      logstorage.Querier
 	engine *logqlengine.Engine
+}
+
+var _ lokiapi.Handler = (*LokiAPI)(nil)
+
+// NewLokiAPI creates new LokiAPI.
+func NewLokiAPI(q logstorage.Querier, engine *logqlengine.Engine) *LokiAPI {
+	return &LokiAPI{
+		q:      q,
+		engine: engine,
+	}
 }
 
 // IndexStats implements indexStats operation.
@@ -35,14 +45,6 @@ type LokiAPI struct {
 func (h *LokiAPI) IndexStats(context.Context, lokiapi.IndexStatsParams) (*lokiapi.IndexStats, error) {
 	// No stats for now.
 	return &lokiapi.IndexStats{}, nil
-}
-
-// NewLokiAPI creates new LokiAPI.
-func NewLokiAPI(q logstorage.Querier, engine *logqlengine.Engine) *LokiAPI {
-	return &LokiAPI{
-		q:      q,
-		engine: engine,
-	}
 }
 
 // LabelValues implements labelValues operation.
@@ -59,15 +61,24 @@ func (h *LokiAPI) LabelValues(ctx context.Context, params lokiapi.LabelValuesPar
 		params.Since,
 	)
 	if err != nil {
-		return nil, errors.Wrap(err, "parse time range")
+		return nil, validationErr(err, "parse time range")
+	}
+
+	var sel logql.Selector
+	if q := params.Query.Or(""); q != "" {
+		sel, err = logql.ParseSelector(q, h.engine.ParseOptions())
+		if err != nil {
+			return nil, validationErr(err, "parse query")
+		}
 	}
 
 	iter, err := h.q.LabelValues(ctx, params.Name, logstorage.LabelsOptions{
-		Start: otelstorage.NewTimestampFromTime(start),
-		End:   otelstorage.NewTimestampFromTime(end),
+		Start: start,
+		End:   end,
+		Query: sel,
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "query")
+		return nil, executionErr(err, "get label values")
 	}
 	defer func() {
 		_ = iter.Close()
@@ -78,7 +89,7 @@ func (h *LokiAPI) LabelValues(ctx context.Context, params lokiapi.LabelValuesPar
 		values = append(values, tag.Value)
 		return nil
 	}); err != nil {
-		return nil, errors.Wrap(err, "map tags")
+		return nil, executionErr(err, "read tags")
 	}
 	lg.Debug("Got tag values",
 		zap.String("label_name", params.Name),
@@ -107,15 +118,15 @@ func (h *LokiAPI) Labels(ctx context.Context, params lokiapi.LabelsParams) (*lok
 		params.Since,
 	)
 	if err != nil {
-		return nil, errors.Wrap(err, "parse time range")
+		return nil, validationErr(err, "parse time range")
 	}
 
 	names, err := h.q.LabelNames(ctx, logstorage.LabelsOptions{
-		Start: otelstorage.NewTimestampFromTime(start),
-		End:   otelstorage.NewTimestampFromTime(end),
+		Start: start,
+		End:   end,
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "query")
+		return nil, executionErr(err, "get label names")
 	}
 	lg.Debug("Got label names", zap.Int("count", len(names)))
 
@@ -140,24 +151,26 @@ func (h *LokiAPI) Push(context.Context, lokiapi.PushReq) error {
 //
 // GET /loki/api/v1/query
 func (h *LokiAPI) Query(ctx context.Context, params lokiapi.QueryParams) (*lokiapi.QueryResponse, error) {
-	lg := zctx.From(ctx)
-
-	ts, err := parseTimestamp(params.Time.Value, time.Now())
+	ts, err := ParseTimestamp(params.Time.Value, time.Now())
 	if err != nil {
-		return nil, errors.Wrap(err, "parse time")
+		return nil, validationErr(err, "parse time")
 	}
 
-	data, err := h.engine.Eval(ctx, params.Query, logqlengine.EvalParams{
-		Start:     otelstorage.NewTimestampFromTime(ts),
-		End:       otelstorage.NewTimestampFromTime(ts),
+	direction, err := parseDirection(params.Direction)
+	if err != nil {
+		return nil, validationErr(err, "parse direction")
+	}
+
+	data, err := h.eval(ctx, params.Query, logqlengine.EvalParams{
+		Start:     ts,
+		End:       ts,
 		Step:      0,
-		Direction: string(params.Direction.Or(lokiapi.DirectionBackward)),
+		Direction: direction,
 		Limit:     params.Limit.Or(100),
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "eval")
+		return nil, evalErr(err, "instant query")
 	}
-	lg.Debug("Query", zap.String("type", string(data.Type)))
 
 	return &lokiapi.QueryResponse{
 		Status: "success",
@@ -171,8 +184,6 @@ func (h *LokiAPI) Query(ctx context.Context, params lokiapi.QueryParams) (*lokia
 //
 // GET /loki/api/v1/query_range
 func (h *LokiAPI) QueryRange(ctx context.Context, params lokiapi.QueryRangeParams) (*lokiapi.QueryResponse, error) {
-	lg := zctx.From(ctx)
-
 	start, end, err := parseTimeRange(
 		time.Now(),
 		params.Start,
@@ -180,25 +191,29 @@ func (h *LokiAPI) QueryRange(ctx context.Context, params lokiapi.QueryRangeParam
 		params.Since,
 	)
 	if err != nil {
-		return nil, errors.Wrap(err, "parse time range")
+		return nil, validationErr(err, "parse time range")
 	}
 
 	step, err := parseStep(params.Step, start, end)
 	if err != nil {
-		return nil, errors.Wrap(err, "parse step")
+		return nil, validationErr(err, "parse step")
 	}
 
-	data, err := h.engine.Eval(ctx, params.Query, logqlengine.EvalParams{
-		Start:     otelstorage.NewTimestampFromTime(start),
-		End:       otelstorage.NewTimestampFromTime(end),
+	direction, err := parseDirection(params.Direction)
+	if err != nil {
+		return nil, validationErr(err, "parse direction")
+	}
+
+	data, err := h.eval(ctx, params.Query, logqlengine.EvalParams{
+		Start:     start,
+		End:       end,
 		Step:      step,
-		Direction: string(params.Direction.Or(lokiapi.DirectionBackward)),
+		Direction: direction,
 		Limit:     params.Limit.Or(100),
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "eval")
+		return nil, evalErr(err, "range query")
 	}
-	lg.Debug("Query range", zap.String("type", string(data.Type)))
 
 	return &lokiapi.QueryResponse{
 		Status: "success",
@@ -219,42 +234,60 @@ func (h *LokiAPI) Series(ctx context.Context, params lokiapi.SeriesParams) (*lok
 		params.Since,
 	)
 	if err != nil {
-		return nil, errors.Wrap(err, "parse time range")
+		return nil, validationErr(err, "parse time range")
 	}
-	out := make([]lokiapi.MapsDataItem, 0, len(params.Match))
-	zctx.From(ctx).Info("Series", zap.Int("match", len(params.Match)))
-	for _, q := range params.Match {
-		// TODO(ernado): offload
-		data, err := h.engine.Eval(ctx, q, logqlengine.EvalParams{
-			Start:     otelstorage.NewTimestampFromTime(start),
-			End:       otelstorage.NewTimestampFromTime(end),
-			Direction: string(lokiapi.DirectionBackward),
-			Limit:     1_000,
-		})
+
+	selectors := make([]logql.Selector, len(params.Match))
+	for i, m := range params.Match {
+		selectors[i], err = logql.ParseSelector(m, h.engine.ParseOptions())
 		if err != nil {
-			return nil, errors.Wrap(err, "eval")
-		}
-		if streams, ok := data.GetStreamsResult(); ok {
-			for _, stream := range streams.Result {
-				if labels, ok := stream.Stream.Get(); ok {
-					// TODO(ernado): should be MapsDataItem 1:1 match?
-					out = append(out, lokiapi.MapsDataItem(labels))
-				}
-			}
+			return nil, validationErr(err, fmt.Sprintf("invalid match[%d]", i))
 		}
 	}
+
+	series, err := h.q.Series(ctx, logstorage.SeriesOptions{
+		Start:     start,
+		End:       end,
+		Selectors: selectors,
+	})
+	if err != nil {
+		return nil, executionErr(err, "get series")
+	}
+
+	// FIXME(tdakkota): copying slice only because generated type is named.
+	result := make([]lokiapi.MapsDataItem, len(series))
+	for i, s := range series {
+		result[i] = s
+	}
+
 	return &lokiapi.Maps{
 		Status: "success",
-		Data:   out,
+		Data:   result,
 	}, nil
+}
+
+func (h *LokiAPI) eval(ctx context.Context, query string, params logqlengine.EvalParams) (r lokiapi.QueryResponseData, _ error) {
+	q, err := h.engine.NewQuery(ctx, query)
+	if err != nil {
+		return r, errors.Wrap(err, "compile query")
+	}
+	r, err = q.Eval(ctx, params)
+	if err != nil {
+		return r, err
+	}
+	return r, nil
 }
 
 // NewError creates *ErrorStatusCode from error returned by handler.
 //
 // Used for common default response.
 func (h *LokiAPI) NewError(_ context.Context, err error) *lokiapi.ErrorStatusCode {
+	code := http.StatusBadRequest
+	if _, ok := errors.Into[*logqlerrors.UnsupportedError](err); ok {
+		code = http.StatusNotImplemented
+	}
 	return &lokiapi.ErrorStatusCode{
-		StatusCode: http.StatusBadRequest,
+		StatusCode: code,
 		Response:   lokiapi.Error(err.Error()),
 	}
 }

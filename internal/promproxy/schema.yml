@@ -1,0 +1,89 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+type: object
+title: Recorder queries file
+additionalProperties: false
+properties:
+  start:
+    type: string
+    format: date-time
+  end:
+    type: string
+    format: date-time
+  step:
+    type: integer
+  series:
+    type: array
+    items:
+      $ref: "#/definitions/seriesQuery"
+  instant:
+    type: array
+    items:
+      $ref: "#/definitions/instantQuery"
+  range:
+    type: array
+    items:
+      $ref: "#/definitions/rangeQuery"
+  queries:
+    type: array
+    items:
+      $ref: "#/definitions/query"
+definitions:
+  query:
+    oneOf:
+      - $ref: "#/definitions/rangeQuery"
+      - $ref: "#/definitions/instantQuery"
+      - $ref: "#/definitions/seriesQuery"
+  seriesQuery:
+    type: object
+    required:
+      - matchers
+    properties:
+      matchers:
+        type: array
+        items:
+          type: string
+        minItems: 1
+      start:
+        type: string
+        format: date-time
+      end:
+        type: string
+        format: date-time
+      title:
+        type: string
+      description:
+        type: string
+  instantQuery:
+    type: object
+    required:
+      - query
+    properties:
+      query:
+        type: string
+      time:
+        type: string
+        format: date-time
+      title:
+        type: string
+      description:
+        type: string
+  rangeQuery:
+    type: object
+    required:
+      - query
+    properties:
+      query:
+        type: string
+      start:
+        type: string
+        format: date-time
+      end:
+        type: string
+        format: date-time
+      step:
+        description: "Step in seconds"
+        type: integer
+      title:
+        type: string
+      description:
+        type: string

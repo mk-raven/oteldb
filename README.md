@@ -4,37 +4,70 @@
 
 # oteldb [![codecov](https://img.shields.io/codecov/c/github/go-faster/oteldb?label=cover)](https://codecov.io/gh/go-faster/oteldb) [![experimental](https://img.shields.io/badge/-experimental-blueviolet)](https://go-faster.org/docs/projects/status#experimental)
 
-The OpenTelemetry-compatible telemetry aggregation, storage and processing.
+The next generation, [OpenTelemetry-first][otel] aggregation system for metrics, traces and logs.
 
-> [!WARNING]  
-> Work in progress.
+Compatible with [PromQL][promql], [TraceQL][traceql] and [LogQL][logql].
 
-## Storage
+Based on [ClickHouse][clickhouse], fastest open-source (Apache 2.0) column-oriented database.
 
-The oteldb is stateless and uses external storage systems for data persistence, processing and aggregation.
+[clickhouse]: https://clickhouse.com/
+[otel]: https://opentelemetry.io/
 
-Currently, we focus on ClickHouse for realtime queries on hot/warm data.
-
-## Query
+> [!WARNING]
+> Work in progress. Not ready for production use.
 
 Supported query languages:
-- LogQL (Loki) for logs
-- TraceQL (Tempo) for traces
-- PromQL (Prometheus) for metrics
+- [PromQL][promql] ([Prometheus][prometheus]) for metrics, [>99% compatibility][compliance]
+- [TraceQL][traceql] ([Grafana Tempo][tempo]) for traces
+- [LogQL][logql] ([Grafana Loki][loki]) for logs
 
-### Prometheus Compatibility
+[traceql]: https://grafana.com/docs/tempo/latest/traceql/
+[logql]: https://grafana.com/docs/loki/latest/query/
+[promql]: https://prometheus.io/docs/prometheus/latest/querying/basics/
+
+[prometheus]: https://prometheus.io/
+[loki]: https://grafana.com/oss/loki/
+[tempo]: https://grafana.com/oss/tempo/
+
+Supported ingestion protocols:
+- Prometheus remote write, including [exemplars][exemplars]
+- OpenTelemetry protocol (gRPC) for metrics, traces and logs
+
+Ingestion is possible with [OpenTelemetry collector][otelcol], supporting [over 90 protocols][otelcol-contrib].
+
+[otelcol]: https://opentelemetry.io/docs/collector/
+[otelcol-contrib]: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver
+[exemplars]: https://grafana.com/docs/grafana/latest/fundamentals/exemplars/
+
+## Demo
+
+https://github.com/user-attachments/assets/647d220c-052a-40d4-9358-7d6039a0f198
+
+## Prometheus Compatibility
+
+See [ch-compliance][compliance] for Prometheus compatibility tests.
 
 ```console
 $ promql-compliance-tester -config-file promql-test-queries.yml -config-file test.oteldb.yml
 Total: 547 / 548 (99.82%) passed, 0 unsupported
 ```
 
-## Local development
+[compliance]: ./dev/local/ch-compliance
 
-Setups oteldb, clickhouse server, grafana, and telemetry generators:
+## Quick Start
+
+Setup oteldb, ClickHouse, Grafana, and telemetry generators:
 
 ```shell
 docker compose -f dev/local/ch/docker-compose.yml up -d
 ```
 
+
+
+
+
 You can open Grafana dashboard at http://localhost:3000/d/oteldb/oteldb
+
+## License
+
+Apache License 2.0, see [LICENSE](./LICENSE).

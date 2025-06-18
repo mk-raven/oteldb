@@ -1,16 +1,12 @@
 package logqlpattern
 
-import (
-	"strings"
-
-	"github.com/go-faster/oteldb/internal/logql"
-)
+import "strings"
 
 // Match matches given pattern against input string.
-func Match(p Pattern, input string, match func(label logql.Label, value string)) bool {
+func Match[Label ~string](p Pattern, input string, match func(label Label, value string)) bool {
 	parts := p.Parts
-	if len(parts) == 0 {
-		return false
+	if len(parts) == 0 && input == "" {
+		return true
 	}
 
 	var ok bool
@@ -24,7 +20,7 @@ func Match(p Pattern, input string, match func(label logql.Label, value string))
 			}
 		case Capture:
 			var (
-				label = logql.Label(part.Value)
+				label = Label(part.Value)
 				value string
 			)
 			if i+1 < len(parts) {
@@ -43,11 +39,11 @@ func Match(p Pattern, input string, match func(label logql.Label, value string))
 				match(label, value)
 			}
 			// If match failed, capture value anyway.
-			if !ok {
+			if !ok || value == "" {
 				return false
 			}
 		}
 	}
 
-	return true
+	return input == ""
 }

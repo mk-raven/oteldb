@@ -1,8 +1,15 @@
 package logql
 
 import (
+	"fmt"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/dustin/go-humanize"
+
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlpattern"
 )
 
 // PipelineStage is a LogQL pipeline stage.
@@ -24,12 +31,63 @@ func (*DropLabelsExpr) pipelineStage()         {}
 func (*KeepLabelsExpr) pipelineStage()         {}
 func (*DistinctFilter) pipelineStage()         {}
 
-// LineFilter is a line filter (`|=`, `!=`, `=~`, `!~`).
+// LineFilter is a line filter (`|=`, `!=`, `=~`, `!~`, `|>`, `!>`).
 type LineFilter struct {
-	Op    BinOp          // OpEq, OpNotEq, OpRe, OpNotRe
+	Op BinOp // OpEq, OpNotEq, OpRe, OpNotRe, OpPattern, OpNotPattern
+	By LineFilterValue
+	Or []LineFilterValue
+}
+
+// String implements [fmt.Stringer].
+func (f LineFilter) String() string {
+	var (
+		sb  strings.Builder
+		buf = make([]byte, 0, 32)
+	)
+	switch f.Op {
+	case OpEq:
+		sb.WriteString("|=")
+	case OpNotEq:
+		sb.WriteString("!=")
+	case OpRe:
+		sb.WriteString("|~")
+	case OpNotRe:
+		sb.WriteString("!~")
+	case OpPattern:
+		sb.WriteString("|>")
+	case OpNotPattern:
+		sb.WriteString("!>")
+	default:
+		sb.WriteString("<invalid op:")
+		sb.WriteString(f.Op.String())
+		sb.WriteByte('>')
+	}
+	sb.WriteByte(' ')
+
+	f.By.write(&sb, &buf)
+	for i := range f.Or {
+		sb.WriteString(" or ")
+		f.Or[i].write(&sb, &buf)
+	}
+	return sb.String()
+}
+
+// LineFilterValue is a line filter literal to search by.
+type LineFilterValue struct {
 	Value string         // Equals to value or to unparsed regexp
 	Re    *regexp.Regexp // Equals to nil, if Op is not OpRe or OpNotRe
 	IP    bool           // true, if this line filter is IP filter.
+}
+
+func (v LineFilterValue) write(sb *strings.Builder, buf *[]byte) {
+	if v.IP {
+		sb.WriteString("ip(")
+	}
+	quoted := strconv.AppendQuote((*buf)[:0], v.Value)
+	sb.Write(quoted)
+	if v.IP {
+		sb.WriteByte(')')
+	}
 }
 
 // JSONExpressionParser extracts and filters labels from JSON.
@@ -46,7 +104,31 @@ type LogfmtExpressionParser struct {
 	Labels []Label
 	// Exprs is a set of extraction expressions.
 	Exprs []LabelExtractionExpr
+	// Flags defines parser flags.
+	Flags LogfmtFlags
 }
+
+// LogfmtFlags defines logfmt parser flags.
+type LogfmtFlags uint8
+
+// Has whether if flag is enabled.
+func (f LogfmtFlags) Has(flag LogfmtFlags) bool {
+	return f&flag != 0
+}
+
+// Set sets flag.
+func (f *LogfmtFlags) Set(flag LogfmtFlags) {
+	*f |= flag
+}
+
+const (
+	// LogfmtFlagStrict whether if parser should stop parsing line
+	// if it contains invalid logfmt pairs.
+	LogfmtFlagStrict LogfmtFlags = 1 << iota
+	// LogfmtFlagKeepEmpty whether if parser should add labels with empty values
+	// to the label set.
+	LogfmtFlagKeepEmpty
+)
 
 // LabelExtractionExpr defines label value to extract.
 type LabelExtractionExpr struct {
@@ -64,7 +146,7 @@ type RegexpLabelParser struct {
 //
 // See https://grafana.com/docs/loki/latest/logql/log_queries/#pattern.
 type PatternLabelParser struct {
-	Pattern string
+	Pattern logqlpattern.Pattern
 }
 
 // UnpackLabelParser unpacks data from promtail.
@@ -88,6 +170,18 @@ type LabelFilter struct {
 // LabelPredicate is a label predicate.
 type LabelPredicate interface {
 	labelPredicate()
+	fmt.Stringer
+}
+
+// UnparenLabelPredicate recursively extracts [LabelPredicate] from parentheses.
+func UnparenLabelPredicate(p LabelPredicate) LabelPredicate {
+	for {
+		sub, ok := p.(*LabelPredicateParen)
+		if !ok {
+			return p
+		}
+		p = sub.X
+	}
 }
 
 // LabelPredicateBinOp defines a logical operation between predicates.
@@ -97,11 +191,21 @@ type LabelPredicateBinOp struct {
 	Right LabelPredicate
 }
 
+// String implements [fmt.Stringer].
+func (p *LabelPredicateBinOp) String() string {
+	return fmt.Sprintf("%s %s %s", p.Left, p.Op, p.Right)
+}
+
 // LabelPredicateParen is a prediacte within parenthesis.
 //
 // FIXME(tdakkota): are we really need it?
 type LabelPredicateParen struct {
 	X LabelPredicate
+}
+
+// String implements [fmt.Stringer].
+func (p *LabelPredicateParen) String() string {
+	return "(" + p.X.String() + ")"
 }
 
 func (*LabelPredicateBinOp) labelPredicate() {}
@@ -112,11 +216,16 @@ func (*BytesFilter) labelPredicate()         {}
 func (*NumberFilter) labelPredicate()        {}
 func (*IPFilter) labelPredicate()            {}
 
-// IPFilter is a IP filtering predicate (`addr == ip("127.0.0.1")`).
+// IPFilter is a IP filtering predicate (`addr = ip("127.0.0.1")`).
 type IPFilter struct {
 	Label Label
 	Op    BinOp // OpEq, OpNotEq
 	Value string
+}
+
+// String implements [fmt.Stringer].
+func (m IPFilter) String() string {
+	return fmt.Sprintf("%s %s ip(%q)", m.Label, m.Op, m.Value)
 }
 
 // DurationFilter is a duration filtering predicate (`elapsed > 10s`).
@@ -126,11 +235,23 @@ type DurationFilter struct {
 	Value time.Duration
 }
 
+// String implements [fmt.Stringer].
+func (m DurationFilter) String() string {
+	return fmt.Sprintf("%s %s %s", m.Label, labelOpString(m.Op), m.Value)
+}
+
 // BytesFilter is a byte size filtering predicate (`size > 10gb`).
 type BytesFilter struct {
 	Label Label
 	Op    BinOp // OpEq, OpNotEq, OpLt, OpLte, OpGt, OpGte
 	Value uint64
+}
+
+// String implements [fmt.Stringer].
+func (m BytesFilter) String() string {
+	// Remove space between value and size.
+	value := strings.ReplaceAll(humanize.IBytes(m.Value), " ", "")
+	return fmt.Sprintf("%s %s %s", m.Label, labelOpString(m.Op), value)
 }
 
 // NumberFilter is a number filtering predicate (`status >= 400`).
@@ -139,6 +260,18 @@ type NumberFilter struct {
 	Op    BinOp // OpEq, OpNotEq, OpLt, OpLte, OpGt, OpGte
 	// FIXME(tdakkota): add integer field?
 	Value float64
+}
+
+// String implements [fmt.Stringer].
+func (m NumberFilter) String() string {
+	return fmt.Sprintf("%s %s %v", m.Label, labelOpString(m.Op), m.Value)
+}
+
+func labelOpString(op BinOp) string {
+	if op == OpEq {
+		return "=="
+	}
+	return op.String()
 }
 
 // LabelFormatExpr renames, modifies or add labels.
@@ -156,8 +289,8 @@ type LabelTemplate struct {
 
 // RenameLabel renames label.
 type RenameLabel struct {
-	Label Label
-	To    Label
+	To   Label
+	From Label
 }
 
 // DropLabelsExpr drops given labels in a pipeline (i.e. deny list).

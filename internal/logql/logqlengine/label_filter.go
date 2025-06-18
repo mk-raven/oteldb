@@ -9,6 +9,7 @@ import (
 	"github.com/go-faster/errors"
 
 	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlabels"
 	"github.com/go-faster/oteldb/internal/otelstorage"
 )
 
@@ -17,6 +18,8 @@ func buildLabelFilter(stage *logql.LabelFilter) (Processor, error) {
 }
 
 func buildLabelPredicate(pred logql.LabelPredicate) (Processor, error) {
+	pred = logql.UnparenLabelPredicate(pred)
+
 	switch pred := pred.(type) {
 	case *logql.LabelPredicateBinOp:
 		left, err := buildLabelPredicate(pred.Left)
@@ -43,8 +46,6 @@ func buildLabelPredicate(pred logql.LabelPredicate) (Processor, error) {
 		default:
 			return nil, errors.Errorf("unexpected operation %q", pred.Op)
 		}
-	case *logql.LabelPredicateParen:
-		return buildLabelPredicate(pred.X)
 	case *logql.LabelMatcher:
 		return buildLabelMatcher(*pred)
 	case *logql.DurationFilter:
@@ -67,7 +68,7 @@ type AndLabelMatcher struct {
 }
 
 // Process implements Processor.
-func (m *AndLabelMatcher) Process(ts otelstorage.Timestamp, line string, set LabelSet) (_ string, keep bool) {
+func (m *AndLabelMatcher) Process(ts otelstorage.Timestamp, line string, set logqlabels.LabelSet) (_ string, keep bool) {
 	line, keep = m.Left.Process(ts, line, set)
 	if !keep {
 		return line, keep
@@ -82,7 +83,7 @@ type OrLabelMatcher struct {
 }
 
 // Process implements Processor.
-func (m *OrLabelMatcher) Process(ts otelstorage.Timestamp, line string, set LabelSet) (_ string, keep bool) {
+func (m *OrLabelMatcher) Process(ts otelstorage.Timestamp, line string, set logqlabels.LabelSet) (_ string, keep bool) {
 	line, keep = m.Left.Process(ts, line, set)
 	if keep {
 		return line, keep
@@ -109,7 +110,11 @@ func buildLabelMatcher(pred logql.LabelMatcher) (Processor, error) {
 }
 
 // Process implements Processor.
-func (lf *LabelMatcher) Process(_ otelstorage.Timestamp, line string, set LabelSet) (_ string, keep bool) {
+func (lf *LabelMatcher) Process(_ otelstorage.Timestamp, line string, set logqlabels.LabelSet) (_ string, keep bool) {
+	// NOTE(tdakkota): unlike other label matchers, string matcher does not
+	// 	return false in case if label not found. Instead, a zero value is matched.
+	//
+	// See https://github.com/grafana/loki/blob/b4f7181c7aa9484e66976e8a933111a9b85ea8c2/pkg/logql/log/label_filter.go#L377
 	labelValue, _ := set.GetString(lf.name)
 	keep = lf.matcher.Match(labelValue)
 	return line, keep
@@ -160,7 +165,7 @@ func buildDurationLabelFilter(pred *logql.DurationFilter) (Processor, error) {
 }
 
 // Process implements Processor.
-func (lf *DurationLabelFilter[C]) Process(_ otelstorage.Timestamp, line string, set LabelSet) (_ string, keep bool) {
+func (lf *DurationLabelFilter[C]) Process(_ otelstorage.Timestamp, line string, set logqlabels.LabelSet) (_ string, keep bool) {
 	v, ok := set.GetString(lf.name)
 	if !ok {
 		return "", false
@@ -222,7 +227,7 @@ func buildBytesLabelFilter(pred *logql.BytesFilter) (Processor, error) {
 }
 
 // Process implements Processor.
-func (lf *BytesLabelFilter[C]) Process(_ otelstorage.Timestamp, line string, set LabelSet) (_ string, keep bool) {
+func (lf *BytesLabelFilter[C]) Process(_ otelstorage.Timestamp, line string, set logqlabels.LabelSet) (_ string, keep bool) {
 	v, ok := set.GetString(lf.name)
 	if !ok {
 		return "", false
@@ -284,7 +289,7 @@ func buildNumberLabelFilter(pred *logql.NumberFilter) (Processor, error) {
 }
 
 // Process implements Processor.
-func (lf *NumberLabelFilter[C]) Process(_ otelstorage.Timestamp, line string, set LabelSet) (_ string, keep bool) {
+func (lf *NumberLabelFilter[C]) Process(_ otelstorage.Timestamp, line string, set logqlabels.LabelSet) (_ string, keep bool) {
 	switch val, ok, err := set.GetFloat(lf.name); {
 	case err != nil:
 		// Keep the line, but set error label.
@@ -306,15 +311,20 @@ type IPLabelFilter struct {
 }
 
 func buildIPLabelFilter(pred *logql.IPFilter) (Processor, error) {
-	matcher, err := buildIPMatcher(pred.Op, pred.Value)
+	matcher, err := buildIPMatcher(pred.Value)
 	if err != nil {
 		return nil, err
+	}
+	if pred.Op == logql.OpNotEq {
+		matcher = NotMatcher[netip.Addr, IPMatcher]{
+			Next: matcher,
+		}
 	}
 	return &IPLabelFilter{name: pred.Label, matcher: matcher}, nil
 }
 
 // Process implements Processor.
-func (lf *IPLabelFilter) Process(_ otelstorage.Timestamp, line string, set LabelSet) (_ string, keep bool) {
+func (lf *IPLabelFilter) Process(_ otelstorage.Timestamp, line string, set logqlabels.LabelSet) (_ string, keep bool) {
 	v, ok := set.GetString(lf.name)
 	if !ok {
 		return "", false

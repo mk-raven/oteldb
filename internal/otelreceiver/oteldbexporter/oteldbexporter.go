@@ -17,10 +17,12 @@ const (
 	stability = component.StabilityLevelDevelopment
 )
 
+var typ = component.MustNewType(typeStr)
+
 // NewFactory creates new factory of [Exporter].
 func NewFactory() exporter.Factory {
 	return exporter.NewFactory(
-		typeStr,
+		typ,
 		createDefaultConfig,
 		exporter.WithTraces(createTracesExporter, stability),
 		exporter.WithMetrics(createMetricsExporter, stability),
@@ -36,7 +38,7 @@ func createDefaultConfig() component.Config {
 
 func createTracesExporter(
 	ctx context.Context,
-	settings exporter.CreateSettings,
+	settings exporter.Settings,
 	cfg component.Config,
 ) (exporter.Traces, error) {
 	ecfg := cfg.(*Config)
@@ -44,12 +46,12 @@ func createTracesExporter(
 	if err != nil {
 		return nil, err
 	}
-	return exporterhelper.NewTracesExporter(ctx, settings, cfg, tracestorage.NewConsumer(inserter).ConsumeTraces)
+	return exporterhelper.NewTraces(ctx, settings, cfg, tracestorage.NewConsumer(inserter).ConsumeTraces)
 }
 
 func createMetricsExporter(
 	ctx context.Context,
-	settings exporter.CreateSettings,
+	settings exporter.Settings,
 	cfg component.Config,
 ) (exporter.Metrics, error) {
 	ecfg := cfg.(*Config)
@@ -57,12 +59,12 @@ func createMetricsExporter(
 	if err != nil {
 		return nil, err
 	}
-	return exporterhelper.NewMetricsExporter(ctx, settings, cfg, inserter.ConsumeMetrics)
+	return exporterhelper.NewMetrics(ctx, settings, cfg, inserter.ConsumeMetrics)
 }
 
 func createLogsExporter(
 	ctx context.Context,
-	settings exporter.CreateSettings,
+	settings exporter.Settings,
 	cfg component.Config,
 ) (exporter.Logs, error) {
 	ecfg := cfg.(*Config)
@@ -70,5 +72,5 @@ func createLogsExporter(
 	if err != nil {
 		return nil, err
 	}
-	return exporterhelper.NewLogsExporter(ctx, settings, cfg, logstorage.NewConsumer(inserter).ConsumeLogs)
+	return exporterhelper.NewLogs(ctx, settings, cfg, logstorage.NewConsumer(inserter).ConsumeLogs)
 }

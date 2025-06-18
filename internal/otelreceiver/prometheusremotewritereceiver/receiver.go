@@ -24,10 +24,10 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
-	"github.com/prometheus/prometheus/prompb"
+	"github.com/valyala/bytebufferpool"
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/component/componentstatus"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/receiver"
@@ -35,13 +35,15 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-faster/oteldb/internal/otelreceiver/prometheusremotewrite"
+	"github.com/go-faster/oteldb/internal/prompb"
+	"github.com/go-faster/oteldb/internal/xsync"
 )
 
 const receiverFormat = "protobuf"
 
 // Receiver is a Prometheus remote write receiver.
 type Receiver struct {
-	params       receiver.CreateSettings
+	params       receiver.Settings
 	host         component.Host
 	nextConsumer consumer.Metrics
 
@@ -58,7 +60,7 @@ type Receiver struct {
 }
 
 // NewReceiver creates new [Start].
-func NewReceiver(params receiver.CreateSettings, config *Config, mconsumer consumer.Metrics) (*Receiver, error) {
+func NewReceiver(params receiver.Settings, config *Config, mconsumer consumer.Metrics) (*Receiver, error) {
 	obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
 		ReceiverID:             params.ID,
 		Transport:              "http",
@@ -75,30 +77,35 @@ func NewReceiver(params receiver.CreateSettings, config *Config, mconsumer consu
 	return zr, err
 }
 
+var _ component.Component = (*Receiver)(nil)
+
 // Start implements [component.Component].
-func (rec *Receiver) Start(_ context.Context, host component.Host) error {
+func (rec *Receiver) Start(ctx context.Context, host component.Host) (err error) {
 	if host == nil {
 		return errors.New("nil host")
 	}
+
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	err := component.ErrNilNextConsumer
+
 	rec.startOnce.Do(func() {
-		err = nil
 		rec.host = host
-		rec.server, err = rec.config.HTTPServerSettings.ToServer(host, rec.params.TelemetrySettings, rec,
+		rec.server, err = rec.config.ServerConfig.ToServer(ctx,
+			host,
+			rec.params.TelemetrySettings,
+			rec,
 			confighttp.WithDecoder("snappy", snappyDecoder),
 		)
 		var listener net.Listener
-		listener, err = rec.config.HTTPServerSettings.ToListener()
+		listener, err = rec.config.ServerConfig.ToListener(ctx)
 		if err != nil {
 			return
 		}
 		rec.shutdownWG.Add(1)
 		go func() {
 			defer rec.shutdownWG.Done()
-			if errHTTP := rec.server.Serve(listener); errHTTP != http.ErrServerClosed {
-				host.ReportFatalError(errHTTP)
+			if errHTTP := rec.server.Serve(listener); !errors.Is(errHTTP, http.ErrServerClosed) {
+				componentstatus.ReportStatus(rec.host, componentstatus.NewFatalErrorEvent(errHTTP))
 			}
 		}()
 	})
@@ -106,8 +113,8 @@ func (rec *Receiver) Start(_ context.Context, host component.Host) error {
 }
 
 func snappyDecoder(body io.ReadCloser) (io.ReadCloser, error) {
-	compressed := getBuf()
-	defer putBuf(compressed)
+	compressed := bytebufferpool.Get()
+	defer bytebufferpool.Put(compressed)
 
 	if _, err := io.Copy(compressed, body); err != nil {
 		return nil, err
@@ -124,36 +131,34 @@ func snappyDecoder(body io.ReadCloser) (io.ReadCloser, error) {
 	}, nil
 }
 
-func decodeRequest(r io.Reader) (*prompb.WriteRequest, error) {
-	var data []byte
+func decodeRequest(r io.Reader, bb *bytebufferpool.ByteBuffer, rw *prompb.WriteRequest) error {
 	switch r := r.(type) {
 	case *closerReader:
 		// Do not make an unnecessary copy of data.
-		data = r.data
+		bb.Set(r.data)
 	default:
-		var err error
-		data, err = io.ReadAll(r)
-		if err != nil {
-			return nil, err
+		if _, err := bb.ReadFrom(r); err != nil {
+			return err
 		}
 	}
-
-	var req prompb.WriteRequest
-	if err := proto.Unmarshal(data, &req); err != nil {
-		return nil, err
-	}
-	return &req, nil
+	return rw.Unmarshal(bb.B)
 }
 
 func (rec *Receiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := rec.obsrecv.StartMetricsOp(r.Context())
-	req, err := decodeRequest(r.Body)
-	if err != nil {
+
+	bb := bytebufferpool.Get()
+	defer bytebufferpool.Put(bb)
+
+	wr := xsync.GetReset(writeRequestPool)
+	defer writeRequestPool.Put(wr)
+
+	if err := decodeRequest(r.Body, bb, wr); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	pms, err := prometheusremotewrite.FromTimeSeries(req.Timeseries, prometheusremotewrite.Settings{
+	pms, err := prometheusremotewrite.FromTimeSeries(wr.Timeseries, prometheusremotewrite.Settings{
 		TimeThreshold: *rec.timeThreshold,
 		Logger:        *rec.logger,
 	})
@@ -172,8 +177,7 @@ func (rec *Receiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Shutdown implements [component.Component].
-func (rec *Receiver) Shutdown(context.Context) error {
-	err := component.ErrNilNextConsumer
+func (rec *Receiver) Shutdown(context.Context) (err error) {
 	rec.stopOnce.Do(func() {
 		err = rec.server.Close()
 		rec.shutdownWG.Wait()

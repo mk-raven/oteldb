@@ -9,6 +9,7 @@ import (
 	"github.com/go-faster/errors"
 	"github.com/prometheus/common/model"
 
+	"github.com/go-faster/oteldb/internal/logql/logqlengine"
 	"github.com/go-faster/oteldb/internal/lokiapi"
 )
 
@@ -35,7 +36,7 @@ func parseTimeRange(
 	}
 
 	endValue := endParam.Or("")
-	end, err = parseTimestamp(endValue, now)
+	end, err = ParseTimestamp(endValue, now)
 	if err != nil {
 		return start, end, errors.Wrapf(err, "parse end %q", endValue)
 	}
@@ -46,14 +47,17 @@ func parseTimeRange(
 	}
 
 	startValue := startParam.Or("")
-	start, err = parseTimestamp(startValue, endOrNow.Add(-since))
+	start, err = ParseTimestamp(startValue, endOrNow.Add(-since))
 	if err != nil {
 		return start, end, errors.Wrapf(err, "parse start %q", startValue)
 	}
 	return start, end, nil
 }
 
-func parseTimestamp(lt lokiapi.LokiTime, def time.Time) (time.Time, error) {
+// ParseTimestamp parses Loki API timestamp from given string.
+//
+// If string is empty, def is returned.
+func ParseTimestamp[S ~string](lt S, def time.Time) (time.Time, error) {
 	value := string(lt)
 	if value == "" {
 		return def, nil
@@ -81,7 +85,7 @@ func parseStep(param lokiapi.OptPrometheusDuration, start, end time.Time) (time.
 	if !ok {
 		return defaultStep(start, end), nil
 	}
-	return parseDuration(v)
+	return ParseDuration(v)
 }
 
 func defaultStep(start, end time.Time) time.Duration {
@@ -92,7 +96,8 @@ func defaultStep(start, end time.Time) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func parseDuration(param lokiapi.PrometheusDuration) (time.Duration, error) {
+// ParseDuration parses Loki API duration from given string.
+func ParseDuration[S ~string](param S) (time.Duration, error) {
 	value := string(param)
 	if !strings.ContainsAny(value, "smhdwy") {
 		f, err := strconv.ParseFloat(value, 64)
@@ -103,4 +108,15 @@ func parseDuration(param lokiapi.PrometheusDuration) (time.Duration, error) {
 	}
 	md, err := model.ParseDuration(value)
 	return time.Duration(md), err
+}
+
+func parseDirection(opt lokiapi.OptDirection) (r logqlengine.Direction, _ error) {
+	switch d := opt.Or(lokiapi.DirectionBackward); d {
+	case lokiapi.DirectionBackward:
+		return logqlengine.DirectionBackward, nil
+	case lokiapi.DirectionForward:
+		return logqlengine.DirectionForward, nil
+	default:
+		return r, errors.Errorf("invalid direction %q", d)
+	}
 }

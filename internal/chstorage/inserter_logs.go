@@ -7,88 +7,104 @@ import (
 	"github.com/go-faster/errors"
 	"github.com/go-faster/sdk/zctx"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/go-faster/oteldb/internal/logstorage"
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/go-faster/oteldb/internal/xsync"
 )
 
-func (i *Inserter) mapRecords(c *logColumns, records []logstorage.Record) {
-	for _, r := range records {
-		c.AddRow(r)
-	}
+type recordWriter struct {
+	logs     *logColumns
+	attrs    *logAttrMapColumns
+	inserter *Inserter
 }
 
-// InsertLogLabels inserts given set of labels to the storage.
-func (i *Inserter) InsertLogLabels(ctx context.Context, set map[logstorage.Label]struct{}) (rerr error) {
-	table := i.tables.LogAttrs
-	ctx, span := i.tracer.Start(ctx, "InsertLogLabels", trace.WithAttributes(
-		attribute.Int("chstorage.labels_count", len(set)),
-		attribute.String("chstorage.table", table),
-	))
-	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
-	}()
+var _ logstorage.RecordWriter = (*recordWriter)(nil)
 
-	attrs := newLogAttrMapColumns()
-	for label := range set {
-		name := otelstorage.KeyToLabel(label.Name)
-		attrs.AddRow(name, label.Name)
-	}
-	if err := i.ch.Do(ctx, ch.Query{
-		Logger: zctx.From(ctx).Named("ch"),
-		Body:   attrs.Input().Into(table),
-		Input:  attrs.Input(),
-	}); err != nil {
-		return errors.Wrap(err, "insert labels")
-	}
-
+// Add adds record to the batch.
+func (w *recordWriter) Add(record logstorage.Record) error {
+	w.logs.AddRow(record)
+	w.attrs.AddAttrs(record.Attrs)
+	w.attrs.AddAttrs(record.ResourceAttrs)
+	w.attrs.AddAttrs(record.ScopeAttrs)
 	return nil
 }
 
-// InsertRecords inserts given records.
-func (i *Inserter) InsertRecords(ctx context.Context, records []logstorage.Record) (rerr error) {
-	table := i.tables.Logs
-	ctx, span := i.tracer.Start(ctx, "InsertRecords", trace.WithAttributes(
-		attribute.Int("chstorage.records_count", len(records)),
-		attribute.String("chstorage.table", table),
+// Submit sends batch.
+func (w *recordWriter) Submit(ctx context.Context) error {
+	return w.inserter.submitLogs(ctx, w.logs, w.attrs)
+}
+
+// Close frees resources.
+func (w *recordWriter) Close() error {
+	logColumnsPool.Put(w.logs)
+	logAttrMapColumnsPool.Put(w.attrs)
+	return nil
+}
+
+var _ logstorage.Inserter = (*Inserter)(nil)
+
+// RecordWriter returns a new [logstorage.RecordWriter]
+func (i *Inserter) RecordWriter(ctx context.Context) (logstorage.RecordWriter, error) {
+	logs := xsync.GetReset(logColumnsPool)
+	attrs := xsync.GetReset(logAttrMapColumnsPool)
+
+	return &recordWriter{
+		logs:     logs,
+		attrs:    attrs,
+		inserter: i,
+	}, nil
+}
+
+func (i *Inserter) submitLogs(ctx context.Context, logs *logColumns, attrs *logAttrMapColumns) (rerr error) {
+	ctx, span := i.tracer.Start(ctx, "chstorage.logs.submitLogs", trace.WithAttributes(
+		attribute.Int("chstorage.records_count", logs.body.Rows()),
+		attribute.Int("chstorage.attrs_count", attrs.name.Rows()),
 	))
 	defer func() {
 		if rerr != nil {
 			span.RecordError(rerr)
 		} else {
-			i.insertedRecords.Add(ctx, int64(len(records)))
+			i.stats.InsertedRecords.Add(ctx, int64(logs.body.Rows()))
+			i.stats.InsertedLogLabels.Add(ctx, int64(attrs.name.Rows()))
+
+			i.stats.Inserts.Add(ctx, 1,
+				metric.WithAttributes(
+					attribute.String("chstorage.signal", "logs"),
+				),
+			)
 		}
 		span.End()
 	}()
 
-	logs := newLogColumns()
-	i.mapRecords(logs, records)
+	grp, grpCtx := errgroup.WithContext(ctx)
+	grp.Go(func() error {
+		ctx := grpCtx
 
-	if err := i.ch.Do(ctx, ch.Query{
-		Logger: zctx.From(ctx).Named("ch"),
-		Body:   logs.Input().Into(table),
-		Input:  logs.Input(),
-	}); err != nil {
-		return errors.Wrap(err, "insert records")
-	}
+		table := i.tables.Logs
+		if err := i.ch.Do(ctx, ch.Query{
+			Logger: zctx.From(ctx).Named("ch"),
+			Body:   logs.Body(table),
+			Input:  logs.Input(),
+		}); err != nil {
+			return errors.Wrap(err, "insert records")
+		}
+		return nil
+	})
+	grp.Go(func() error {
+		ctx := grpCtx
 
-	attrs := newLogAttrMapColumns()
-	for _, record := range records {
-		attrs.AddAttrs(record.Attrs)
-		attrs.AddAttrs(record.ResourceAttrs)
-		attrs.AddAttrs(record.ScopeAttrs)
-	}
-	if err := i.ch.Do(ctx, ch.Query{
-		Logger: zctx.From(ctx).Named("ch"),
-		Body:   attrs.Input().Into(i.tables.LogAttrs),
-		Input:  attrs.Input(),
-	}); err != nil {
-		return errors.Wrap(err, "insert labels")
-	}
-
-	return nil
+		table := i.tables.LogAttrs
+		if err := i.ch.Do(ctx, ch.Query{
+			Logger: zctx.From(ctx).Named("ch"),
+			Body:   attrs.Body(table),
+			Input:  attrs.Input(),
+		}); err != nil {
+			return errors.Wrap(err, "insert labels")
+		}
+		return nil
+	})
+	return grp.Wait()
 }

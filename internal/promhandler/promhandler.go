@@ -3,6 +3,8 @@ package promhandler
 
 import (
 	"context"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/go-faster/errors"
@@ -13,12 +15,14 @@ import (
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/annotations"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/exp/maps"
+	"golang.org/x/sync/errgroup"
 
+	"github.com/go-faster/oteldb/internal/metricstorage"
 	"github.com/go-faster/oteldb/internal/promapi"
 )
-
-var _ promapi.Handler = (*PromAPI)(nil)
 
 // Engine is a Prometheus engine interface.
 type Engine interface {
@@ -34,6 +38,8 @@ type PromAPI struct {
 
 	lookbackDelta time.Duration
 }
+
+var _ promapi.Handler = (*PromAPI)(nil)
 
 // NewPromAPI creates new PromAPI.
 func NewPromAPI(
@@ -51,14 +57,16 @@ func NewPromAPI(
 	}
 }
 
+var errResultTruncated = errors.New("results truncated due to limit")
+
 // GetLabelValues implements getLabelValues operation.
 // GET /api/v1/label/{label}/values
 func (h *PromAPI) GetLabelValues(ctx context.Context, params promapi.GetLabelValuesParams) (*promapi.LabelValuesResponse, error) {
-	mint, err := parseOptTimestamp(params.Start, MinTime)
+	mint, err := parseOptTimestamp(params.Start, promapi.MinTime)
 	if err != nil {
 		return nil, validationErr("parse start", err)
 	}
-	maxt, err := parseOptTimestamp(params.End, MaxTime)
+	maxt, err := parseOptTimestamp(params.End, promapi.MaxTime)
 	if err != nil {
 		return nil, validationErr("parse end", err)
 	}
@@ -66,10 +74,11 @@ func (h *PromAPI) GetLabelValues(ctx context.Context, params promapi.GetLabelVal
 	if err != nil {
 		return nil, validationErr("parse match", err)
 	}
+	hints := &storage.LabelHints{Limit: params.Limit.Or(0)}
 
-	q, err := h.store.Querier(mint.UnixMilli(), maxt.UnixMilli())
+	q, err := h.querier(ctx, mint, maxt)
 	if err != nil {
-		return nil, executionErr("get querier", err)
+		return nil, err
 	}
 	defer func() {
 		_ = q.Close()
@@ -82,38 +91,70 @@ func (h *PromAPI) GetLabelValues(ctx context.Context, params promapi.GetLabelVal
 			matchers = sets[0]
 		}
 
-		values, warnings, err := q.LabelValues(ctx, params.Label, matchers...)
+		values, annots, err := q.LabelValues(ctx, params.Label, hints, matchers...)
 		if err != nil {
 			return nil, executionErr("get label values", err)
 		}
+		if l := params.Limit.Or(-1); l > 0 && len(values) >= l {
+			values = values[:l]
+			annots.Add(errResultTruncated)
+		}
 
+		warnings, infos := annots.AsStrings("", 0, 0)
 		return &promapi.LabelValuesResponse{
 			Status:   "success",
-			Warnings: warnings.AsStrings("", 0),
+			Warnings: warnings,
+			Infos:    infos,
 			Data:     values,
 		}, nil
 	}
 
 	var (
-		data     = map[string]struct{}{}
-		warnings annotations.Annotations
+		dedup  = map[string]struct{}{}
+		annots annotations.Annotations
+		mux    sync.Mutex
 	)
+	grp, grpCtx := errgroup.WithContext(ctx)
 	for _, set := range sets {
-		vals, w, err := q.LabelValues(ctx, params.Label, set...)
-		if err != nil {
-			return nil, executionErr("get label values", err)
-		}
+		set := set
 
-		for _, val := range vals {
-			data[val] = struct{}{}
-		}
-		warnings = warnings.Merge(w)
+		grp.Go(func() error {
+			ctx := grpCtx
+
+			vals, w, err := q.LabelValues(ctx, params.Label, hints, set...)
+			if err != nil {
+				return err
+			}
+
+			mux.Lock()
+			defer mux.Unlock()
+
+			for _, val := range vals {
+				dedup[val] = struct{}{}
+			}
+			annots = annots.Merge(w)
+			return nil
+		})
+	}
+	if err := grp.Wait(); err != nil {
+		return nil, executionErr("get labels", err)
 	}
 
+	data := maps.Keys(dedup)
+	slices.Sort(data)
+	// Truncating data AFTER reading whole data into memory is suboptimal, yet
+	// it makes output consistent.
+	if l := params.Limit.Or(-1); l > 0 && len(data) >= l {
+		data = data[:l]
+		annots.Add(errResultTruncated)
+	}
+
+	warnings, infos := annots.AsStrings("", 0, 0)
 	return &promapi.LabelValuesResponse{
 		Status:   "success",
-		Warnings: warnings.AsStrings("", 0),
-		Data:     maps.Keys(data),
+		Warnings: warnings,
+		Infos:    infos,
+		Data:     data,
 	}, nil
 }
 
@@ -121,11 +162,11 @@ func (h *PromAPI) GetLabelValues(ctx context.Context, params promapi.GetLabelVal
 //
 // GET /api/v1/labels
 func (h *PromAPI) GetLabels(ctx context.Context, params promapi.GetLabelsParams) (*promapi.LabelsResponse, error) {
-	mint, err := parseOptTimestamp(params.Start, MinTime)
+	mint, err := parseOptTimestamp(params.Start, promapi.MinTime)
 	if err != nil {
 		return nil, validationErr("parse start", err)
 	}
-	maxt, err := parseOptTimestamp(params.End, MaxTime)
+	maxt, err := parseOptTimestamp(params.End, promapi.MaxTime)
 	if err != nil {
 		return nil, validationErr("parse end", err)
 	}
@@ -133,10 +174,11 @@ func (h *PromAPI) GetLabels(ctx context.Context, params promapi.GetLabelsParams)
 	if err != nil {
 		return nil, validationErr("parse match", err)
 	}
+	hints := &storage.LabelHints{Limit: params.Limit.Or(0)}
 
-	q, err := h.store.Querier(mint.UnixMilli(), maxt.UnixMilli())
+	q, err := h.querier(ctx, mint, maxt)
 	if err != nil {
-		return nil, executionErr("get querier", err)
+		return nil, err
 	}
 	defer func() {
 		_ = q.Close()
@@ -149,38 +191,70 @@ func (h *PromAPI) GetLabels(ctx context.Context, params promapi.GetLabelsParams)
 			matchers = sets[0]
 		}
 
-		values, warnings, err := q.LabelNames(ctx, matchers...)
+		values, annots, err := q.LabelNames(ctx, hints, matchers...)
 		if err != nil {
 			return nil, executionErr("label names", err)
 		}
+		if l := params.Limit.Or(-1); l > 0 && len(values) >= l {
+			values = values[:l]
+			annots.Add(errResultTruncated)
+		}
 
+		warnings, infos := annots.AsStrings("", 0, 0)
 		return &promapi.LabelsResponse{
 			Status:   "success",
-			Warnings: warnings.AsStrings("", 0),
+			Warnings: warnings,
+			Infos:    infos,
 			Data:     values,
 		}, nil
 	}
 
 	var (
-		data     = map[string]struct{}{}
-		warnings annotations.Annotations
+		dedup  = map[string]struct{}{}
+		annots annotations.Annotations
+		mux    sync.Mutex
 	)
+	grp, grpCtx := errgroup.WithContext(ctx)
 	for _, set := range sets {
-		vals, w, err := q.LabelNames(ctx, set...)
-		if err != nil {
-			return nil, executionErr("get label names", err)
-		}
+		set := set
 
-		for _, val := range vals {
-			data[val] = struct{}{}
-		}
-		warnings = warnings.Merge(w)
+		grp.Go(func() error {
+			ctx := grpCtx
+
+			vals, w, err := q.LabelNames(ctx, hints, set...)
+			if err != nil {
+				return err
+			}
+
+			mux.Lock()
+			defer mux.Unlock()
+
+			for _, val := range vals {
+				dedup[val] = struct{}{}
+			}
+			annots = annots.Merge(w)
+			return nil
+		})
+	}
+	if err := grp.Wait(); err != nil {
+		return nil, executionErr("get labels", err)
 	}
 
+	data := maps.Keys(dedup)
+	slices.Sort(data)
+	// Truncating data AFTER reading whole data into memory is suboptimal, yet
+	// it makes output consistent.
+	if l := params.Limit.Or(-1); l > 0 && len(data) >= l {
+		data = data[:l]
+		annots.Add(errResultTruncated)
+	}
+
+	warnings, infos := annots.AsStrings("", 0, 0)
 	return &promapi.LabelsResponse{
 		Status:   "success",
-		Warnings: warnings.AsStrings("", 0),
-		Data:     maps.Keys(data),
+		Warnings: warnings,
+		Infos:    infos,
+		Data:     data,
 	}, nil
 }
 
@@ -319,7 +393,7 @@ func (h *PromAPI) GetQueryExemplars(ctx context.Context, params promapi.GetQuery
 
 	q, err := h.exemplars.ExemplarQuerier(ctx)
 	if err != nil {
-		return nil, executionErr("get querier", err)
+		return nil, executionErr("get exemplar querier", err)
 	}
 	queryResults, err := q.Select(start.UnixMilli(), end.UnixMilli(), matcherSets...)
 	if err != nil {
@@ -383,11 +457,11 @@ func (h *PromAPI) GetRules(context.Context, promapi.GetRulesParams) (*promapi.Ru
 //
 // GET /api/v1/series
 func (h *PromAPI) GetSeries(ctx context.Context, params promapi.GetSeriesParams) (*promapi.SeriesResponse, error) {
-	mint, err := parseOptTimestamp(params.Start, MinTime)
+	mint, err := parseOptTimestamp(params.Start, promapi.MinTime)
 	if err != nil {
 		return nil, validationErr("parse start", err)
 	}
-	maxt, err := parseOptTimestamp(params.End, MaxTime)
+	maxt, err := parseOptTimestamp(params.End, promapi.MaxTime)
 	if err != nil {
 		return nil, validationErr("parse end", err)
 	}
@@ -400,39 +474,38 @@ func (h *PromAPI) GetSeries(ctx context.Context, params promapi.GetSeriesParams)
 		return nil, validationErr("validate match", err)
 	}
 
-	q, err := h.store.Querier(mint.UnixMilli(), maxt.UnixMilli())
+	q, err := h.querier(ctx, mint, maxt)
 	if err != nil {
-		return nil, executionErr("get querier", err)
+		return nil, err
 	}
 	defer func() {
 		_ = q.Close()
 	}()
 
-	var (
-		hints = &storage.SelectHints{
-			Start: mint.UnixMilli(),
-			End:   maxt.UnixMilli(),
-			Func:  "series",
-		}
-		sortSeries = false
-		result     storage.SeriesSet
-	)
-	if len(matchers) > 1 {
-		var sets []storage.SeriesSet
-		for _, mset := range matchers {
-			set := q.Select(ctx, sortSeries, hints, mset...)
-			if err := set.Err(); err != nil {
-				return nil, executionErr("select", err)
-			}
-			sets = append(sets, set)
-		}
-		result = storage.NewMergeSeriesSet(sets, storage.ChainedSeriesMerge)
+	var result storage.SeriesSet
+	if osq, ok := q.(metricstorage.OptimizedSeriesQuerier); ok {
+		// TODO(tdakkota): pass limit.
+		result = osq.OnlySeries(ctx, false, mint.UnixMilli(), maxt.UnixMilli(), matchers...)
 	} else {
-		result = q.Select(ctx, sortSeries, hints, matchers[0]...)
+		result, err = h.querySeries(ctx, q, mint, maxt, matchers, params)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	var data []promapi.LabelSet
+	var (
+		data   []promapi.LabelSet
+		annots = result.Warnings()
+
+		limit = params.Limit.Or(-1)
+	)
 	for result.Next() {
+		if limit > 0 && len(data) >= limit {
+			data = data[:limit]
+			annots.Add(errResultTruncated)
+			break
+		}
+
 		series := result.At()
 		data = append(data, series.Labels().Map())
 	}
@@ -440,11 +513,62 @@ func (h *PromAPI) GetSeries(ctx context.Context, params promapi.GetSeriesParams)
 		return nil, executionErr("select", err)
 	}
 
+	warnings, infos := result.Warnings().AsStrings("", 0, 0)
 	return &promapi.SeriesResponse{
 		Status:   "success",
-		Warnings: result.Warnings().AsStrings("", 0),
+		Warnings: warnings,
+		Infos:    infos,
 		Data:     data,
 	}, nil
+}
+
+func (h *PromAPI) querySeries(
+	ctx context.Context,
+	q storage.Querier,
+	mint, maxt time.Time,
+	matchers [][]*labels.Matcher,
+	params promapi.GetSeriesParams,
+) (storage.SeriesSet, error) {
+	var (
+		hints = &storage.SelectHints{
+			Start: mint.UnixMilli(),
+			End:   maxt.UnixMilli(),
+			Limit: params.Limit.Or(0),
+			Func:  "series",
+		}
+		result storage.SeriesSet
+	)
+	if len(matchers) > 1 {
+		var (
+			sets        = make([]storage.SeriesSet, len(matchers))
+			grp, grpCtx = errgroup.WithContext(ctx)
+		)
+		for i, mset := range matchers {
+			i, mset := i, mset
+			grp.Go(func() error {
+				ctx := grpCtx
+
+				set := q.Select(ctx, true, hints, mset...)
+				if err := set.Err(); err != nil {
+					sel := "<match>"
+					if m := params.Match; i < len(m) {
+						sel = m[i]
+					}
+					return errors.Wrapf(err, "select %s", sel)
+				}
+				sets[i] = set
+				return nil
+			})
+		}
+		if err := grp.Wait(); err != nil {
+			return nil, executionErr("select", err)
+		}
+
+		result = storage.NewMergeSeriesSet(sets, 0, storage.ChainedSeriesMerge)
+	} else {
+		result = q.Select(ctx, false, hints, matchers[0]...)
+	}
+	return result, nil
 }
 
 // PostSeries implements postSeries operation.
@@ -458,6 +582,18 @@ func (h *PromAPI) PostSeries(ctx context.Context, req *promapi.SeriesForm) (*pro
 		End:   req.End,
 		Match: req.Match,
 	})
+}
+
+func (h *PromAPI) querier(ctx context.Context, mint, maxt time.Time) (storage.Querier, error) {
+	q, err := h.store.Querier(mint.UnixMilli(), maxt.UnixMilli())
+	if err != nil {
+		return nil, executionErr("get querier", err)
+	}
+	trace.SpanFromContext(ctx).AddEvent("querier_created", trace.WithAttributes(
+		attribute.Int64("promapi.mint", mint.UnixMilli()),
+		attribute.Int64("promapi.maxt", maxt.UnixMilli()),
+	))
+	return q, nil
 }
 
 // NewError creates *FailStatusCode from error returned by handler.

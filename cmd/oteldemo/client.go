@@ -10,26 +10,25 @@ import (
 	"github.com/go-faster/sdk/zctx"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
-
-	"github.com/go-faster/oteldb/internal/autologs"
 )
 
-func client(ctx context.Context, lg *zap.Logger, m *app.Metrics) error {
-	ctx, err := autologs.Setup(ctx, m)
-	if err != nil {
-		return errors.Wrap(err, "setup logs")
-	}
-
+func client(ctx context.Context, lg *zap.Logger, m *app.Telemetry) error {
 	httpTransport := otelhttp.NewTransport(http.DefaultTransport,
 		otelhttp.WithTracerProvider(m.TracerProvider()),
 		otelhttp.WithMeterProvider(m.MeterProvider()),
 	)
+	meter := m.MeterProvider().Meter("oteldemo.client")
+	sentRequestsCount, err := meter.Int64Counter("oteldemo.client.sent_requests")
+	if err != nil {
+		return errors.Wrap(err, "create counter")
+	}
 	httpClient := &http.Client{
 		Transport: httpTransport,
 		Timeout:   time.Second * 10,
 	}
 	tracer := m.TracerProvider().Tracer("client")
 	sendRequest := func(ctx context.Context) {
+		sentRequestsCount.Add(ctx, 1)
 		ctx, cancel := context.WithTimeout(ctx, time.Second*2)
 		defer cancel()
 

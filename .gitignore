@@ -22,7 +22,13 @@ secret.yaml
 /otelfaker
 /chotel
 
+vmagent-remotewrite-data
+
 # goreleaser
 dist
 coverage.txt
 .task
+
+/requests.rwq
+/report.yml
+/otelbench

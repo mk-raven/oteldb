@@ -233,9 +233,13 @@ func (s *AlertingRule) encodeFields(e *jx.Encoder) {
 		e.FieldStart("lastEvaluation")
 		json.EncodeDateTime(e, s.LastEvaluation)
 	}
+	{
+		e.FieldStart("type")
+		e.Str(s.Type)
+	}
 }
 
-var jsonFieldsNameOfAlertingRule = [11]string{
+var jsonFieldsNameOfAlertingRule = [12]string{
 	0:  "state",
 	1:  "name",
 	2:  "query",
@@ -247,6 +251,7 @@ var jsonFieldsNameOfAlertingRule = [11]string{
 	8:  "lastError",
 	9:  "evaluationTime",
 	10: "lastEvaluation",
+	11: "type",
 }
 
 // Decode decodes AlertingRule from json.
@@ -389,7 +394,17 @@ func (s *AlertingRule) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"lastEvaluation\"")
 			}
 		case "type":
-			return d.Skip()
+			requiredBitSet[1] |= 1 << 3
+			if err := func() error {
+				v, err := d.Str()
+				s.Type = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"type\"")
+			}
 		default:
 			return d.Skip()
 		}
@@ -401,7 +416,7 @@ func (s *AlertingRule) Decode(d *jx.Decoder) error {
 	var failures []validate.FieldError
 	for i, mask := range [2]uint8{
 		0b11111110,
-		0b00000111,
+		0b00001111,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -593,19 +608,51 @@ func (s Data) encodeFields(e *jx.Encoder) {
 	case MatrixData:
 		e.FieldStart("resultType")
 		e.Str("matrix")
-		s.Matrix.encodeFields(e)
-	case ScalarData:
-		e.FieldStart("resultType")
-		e.Str("scalar")
-		s.Scalar.encodeFields(e)
-	case StringData:
-		e.FieldStart("resultType")
-		e.Str("string")
-		s.String.encodeFields(e)
+		{
+			s := s.Matrix
+			{
+				e.FieldStart("result")
+				e.ArrStart()
+				for _, elem := range s.Result {
+					elem.Encode(e)
+				}
+				e.ArrEnd()
+			}
+		}
 	case VectorData:
 		e.FieldStart("resultType")
 		e.Str("vector")
-		s.Vector.encodeFields(e)
+		{
+			s := s.Vector
+			{
+				e.FieldStart("result")
+				e.ArrStart()
+				for _, elem := range s.Result {
+					elem.Encode(e)
+				}
+				e.ArrEnd()
+			}
+		}
+	case ScalarData:
+		e.FieldStart("resultType")
+		e.Str("scalar")
+		{
+			s := s.Scalar
+			{
+				e.FieldStart("result")
+				s.Result.Encode(e)
+			}
+		}
+	case StringData:
+		e.FieldStart("resultType")
+		e.Str("string")
+		{
+			s := s.String
+			{
+				e.FieldStart("result")
+				s.Result.Encode(e)
+			}
+		}
 	}
 }
 
@@ -635,14 +682,14 @@ func (s *Data) Decode(d *jx.Decoder) error {
 				case "matrix":
 					s.Type = MatrixData
 					found = true
+				case "vector":
+					s.Type = VectorData
+					found = true
 				case "scalar":
 					s.Type = ScalarData
 					found = true
 				case "string":
 					s.Type = StringData
-					found = true
-				case "vector":
-					s.Type = VectorData
 					found = true
 				default:
 					return errors.Errorf("unknown type %s", typ)
@@ -1613,15 +1660,26 @@ func (s *LabelValuesResponse) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Infos != nil {
+			e.FieldStart("infos")
+			e.ArrStart()
+			for _, elem := range s.Infos {
+				e.Str(elem)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
 		e.FieldStart("data")
 		s.Data.Encode(e)
 	}
 }
 
-var jsonFieldsNameOfLabelValuesResponse = [3]string{
+var jsonFieldsNameOfLabelValuesResponse = [4]string{
 	0: "status",
 	1: "warnings",
-	2: "data",
+	2: "infos",
+	3: "data",
 }
 
 // Decode decodes LabelValuesResponse from json.
@@ -1665,8 +1723,27 @@ func (s *LabelValuesResponse) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"warnings\"")
 			}
+		case "infos":
+			if err := func() error {
+				s.Infos = make([]string, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem string
+					v, err := d.Str()
+					elem = string(v)
+					if err != nil {
+						return err
+					}
+					s.Infos = append(s.Infos, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"infos\"")
+			}
 		case "data":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				if err := s.Data.Decode(d); err != nil {
 					return err
@@ -1685,7 +1762,7 @@ func (s *LabelValuesResponse) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000101,
+		0b00001001,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -1807,15 +1884,26 @@ func (s *LabelsResponse) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Infos != nil {
+			e.FieldStart("infos")
+			e.ArrStart()
+			for _, elem := range s.Infos {
+				e.Str(elem)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
 		e.FieldStart("data")
 		s.Data.Encode(e)
 	}
 }
 
-var jsonFieldsNameOfLabelsResponse = [3]string{
+var jsonFieldsNameOfLabelsResponse = [4]string{
 	0: "status",
 	1: "warnings",
-	2: "data",
+	2: "infos",
+	3: "data",
 }
 
 // Decode decodes LabelsResponse from json.
@@ -1859,8 +1947,27 @@ func (s *LabelsResponse) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"warnings\"")
 			}
+		case "infos":
+			if err := func() error {
+				s.Infos = make([]string, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem string
+					v, err := d.Str()
+					elem = string(v)
+					if err != nil {
+						return err
+					}
+					s.Infos = append(s.Infos, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"infos\"")
+			}
 		case "data":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				if err := s.Data.Decode(d); err != nil {
 					return err
@@ -1879,7 +1986,7 @@ func (s *LabelsResponse) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000101,
+		0b00001001,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -1975,8 +2082,6 @@ func (s *Matrix) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"result\"")
 			}
-		case "resultType":
-			return d.Skip()
 		default:
 			return d.Skip()
 		}
@@ -2329,15 +2434,26 @@ func (s *MetadataResponse) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Infos != nil {
+			e.FieldStart("infos")
+			e.ArrStart()
+			for _, elem := range s.Infos {
+				e.Str(elem)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
 		e.FieldStart("data")
 		s.Data.Encode(e)
 	}
 }
 
-var jsonFieldsNameOfMetadataResponse = [3]string{
+var jsonFieldsNameOfMetadataResponse = [4]string{
 	0: "status",
 	1: "warnings",
-	2: "data",
+	2: "infos",
+	3: "data",
 }
 
 // Decode decodes MetadataResponse from json.
@@ -2381,8 +2497,27 @@ func (s *MetadataResponse) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"warnings\"")
 			}
+		case "infos":
+			if err := func() error {
+				s.Infos = make([]string, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem string
+					v, err := d.Str()
+					elem = string(v)
+					if err != nil {
+						return err
+					}
+					s.Infos = append(s.Infos, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"infos\"")
+			}
 		case "data":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				if err := s.Data.Decode(d); err != nil {
 					return err
@@ -2401,7 +2536,7 @@ func (s *MetadataResponse) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000101,
+		0b00001001,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -2893,15 +3028,26 @@ func (s *QueryExemplarsResponse) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Infos != nil {
+			e.FieldStart("infos")
+			e.ArrStart()
+			for _, elem := range s.Infos {
+				e.Str(elem)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
 		e.FieldStart("data")
 		s.Data.Encode(e)
 	}
 }
 
-var jsonFieldsNameOfQueryExemplarsResponse = [3]string{
+var jsonFieldsNameOfQueryExemplarsResponse = [4]string{
 	0: "status",
 	1: "warnings",
-	2: "data",
+	2: "infos",
+	3: "data",
 }
 
 // Decode decodes QueryExemplarsResponse from json.
@@ -2945,8 +3091,27 @@ func (s *QueryExemplarsResponse) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"warnings\"")
 			}
+		case "infos":
+			if err := func() error {
+				s.Infos = make([]string, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem string
+					v, err := d.Str()
+					elem = string(v)
+					if err != nil {
+						return err
+					}
+					s.Infos = append(s.Infos, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"infos\"")
+			}
 		case "data":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				if err := s.Data.Decode(d); err != nil {
 					return err
@@ -2965,7 +3130,7 @@ func (s *QueryExemplarsResponse) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000101,
+		0b00001001,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -3035,15 +3200,26 @@ func (s *QueryResponse) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Infos != nil {
+			e.FieldStart("infos")
+			e.ArrStart()
+			for _, elem := range s.Infos {
+				e.Str(elem)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
 		e.FieldStart("data")
 		s.Data.Encode(e)
 	}
 }
 
-var jsonFieldsNameOfQueryResponse = [3]string{
+var jsonFieldsNameOfQueryResponse = [4]string{
 	0: "status",
 	1: "warnings",
-	2: "data",
+	2: "infos",
+	3: "data",
 }
 
 // Decode decodes QueryResponse from json.
@@ -3087,8 +3263,27 @@ func (s *QueryResponse) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"warnings\"")
 			}
+		case "infos":
+			if err := func() error {
+				s.Infos = make([]string, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem string
+					v, err := d.Str()
+					elem = string(v)
+					if err != nil {
+						return err
+					}
+					s.Infos = append(s.Infos, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"infos\"")
+			}
 		case "data":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				if err := s.Data.Decode(d); err != nil {
 					return err
@@ -3107,7 +3302,7 @@ func (s *QueryResponse) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000101,
+		0b00001001,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -3190,9 +3385,13 @@ func (s *RecordingRule) encodeFields(e *jx.Encoder) {
 		e.FieldStart("lastEvaluation")
 		e.Float64(s.LastEvaluation)
 	}
+	{
+		e.FieldStart("type")
+		e.Str(s.Type)
+	}
 }
 
-var jsonFieldsNameOfRecordingRule = [7]string{
+var jsonFieldsNameOfRecordingRule = [8]string{
 	0: "name",
 	1: "query",
 	2: "labels",
@@ -3200,6 +3399,7 @@ var jsonFieldsNameOfRecordingRule = [7]string{
 	4: "lastError",
 	5: "evaluationTime",
 	6: "lastEvaluation",
+	7: "type",
 }
 
 // Decode decodes RecordingRule from json.
@@ -3292,7 +3492,17 @@ func (s *RecordingRule) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"lastEvaluation\"")
 			}
 		case "type":
-			return d.Skip()
+			requiredBitSet[0] |= 1 << 7
+			if err := func() error {
+				v, err := d.Str()
+				s.Type = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"type\"")
+			}
 		default:
 			return d.Skip()
 		}
@@ -3303,7 +3513,7 @@ func (s *RecordingRule) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b01111111,
+		0b11111111,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -3361,11 +3571,93 @@ func (s Rule) encodeFields(e *jx.Encoder) {
 	case AlertingRuleRule:
 		e.FieldStart("type")
 		e.Str("alerting")
-		s.AlertingRule.encodeFields(e)
+		{
+			s := s.AlertingRule
+			{
+				if s.State.Set {
+					e.FieldStart("state")
+					s.State.Encode(e)
+				}
+			}
+			{
+				e.FieldStart("name")
+				e.Str(s.Name)
+			}
+			{
+				e.FieldStart("query")
+				e.Str(s.Query)
+			}
+			{
+				e.FieldStart("duration")
+				e.Str(s.Duration)
+			}
+			{
+				e.FieldStart("labels")
+				s.Labels.Encode(e)
+			}
+			{
+				e.FieldStart("annotations")
+				s.Annotations.Encode(e)
+			}
+			{
+				e.FieldStart("alerts")
+				e.ArrStart()
+				for _, elem := range s.Alerts {
+					elem.Encode(e)
+				}
+				e.ArrEnd()
+			}
+			{
+				e.FieldStart("health")
+				s.Health.Encode(e)
+			}
+			{
+				e.FieldStart("lastError")
+				e.Str(s.LastError)
+			}
+			{
+				e.FieldStart("evaluationTime")
+				e.Float64(s.EvaluationTime)
+			}
+			{
+				e.FieldStart("lastEvaluation")
+				json.EncodeDateTime(e, s.LastEvaluation)
+			}
+		}
 	case RecordingRuleRule:
 		e.FieldStart("type")
 		e.Str("recording")
-		s.RecordingRule.encodeFields(e)
+		{
+			s := s.RecordingRule
+			{
+				e.FieldStart("name")
+				e.Str(s.Name)
+			}
+			{
+				e.FieldStart("query")
+				e.Str(s.Query)
+			}
+			{
+				e.FieldStart("labels")
+				s.Labels.Encode(e)
+			}
+			{
+				e.FieldStart("health")
+				s.Health.Encode(e)
+			}
+			{
+				e.FieldStart("lastError")
+				e.Str(s.LastError)
+			}
+			{
+				e.FieldStart("evaluationTime")
+				json.EncodeDateTime(e, s.EvaluationTime)
+			}
+			{
+				e.FieldStart("lastEvaluation")
+				e.Float64(s.LastEvaluation)
+			}
+		}
 	}
 }
 
@@ -3787,15 +4079,26 @@ func (s *RulesResponse) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Infos != nil {
+			e.FieldStart("infos")
+			e.ArrStart()
+			for _, elem := range s.Infos {
+				e.Str(elem)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
 		e.FieldStart("data")
 		s.Data.Encode(e)
 	}
 }
 
-var jsonFieldsNameOfRulesResponse = [3]string{
+var jsonFieldsNameOfRulesResponse = [4]string{
 	0: "status",
 	1: "warnings",
-	2: "data",
+	2: "infos",
+	3: "data",
 }
 
 // Decode decodes RulesResponse from json.
@@ -3839,8 +4142,27 @@ func (s *RulesResponse) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"warnings\"")
 			}
+		case "infos":
+			if err := func() error {
+				s.Infos = make([]string, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem string
+					v, err := d.Str()
+					elem = string(v)
+					if err != nil {
+						return err
+					}
+					s.Infos = append(s.Infos, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"infos\"")
+			}
 		case "data":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				if err := s.Data.Decode(d); err != nil {
 					return err
@@ -3859,7 +4181,7 @@ func (s *RulesResponse) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000101,
+		0b00001001,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -4009,8 +4331,6 @@ func (s *Scalar) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"result\"")
 			}
-		case "resultType":
-			return d.Skip()
 		default:
 			return d.Skip()
 		}
@@ -4141,15 +4461,26 @@ func (s *SeriesResponse) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Infos != nil {
+			e.FieldStart("infos")
+			e.ArrStart()
+			for _, elem := range s.Infos {
+				e.Str(elem)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
 		e.FieldStart("data")
 		s.Data.Encode(e)
 	}
 }
 
-var jsonFieldsNameOfSeriesResponse = [3]string{
+var jsonFieldsNameOfSeriesResponse = [4]string{
 	0: "status",
 	1: "warnings",
-	2: "data",
+	2: "infos",
+	3: "data",
 }
 
 // Decode decodes SeriesResponse from json.
@@ -4193,8 +4524,27 @@ func (s *SeriesResponse) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"warnings\"")
 			}
+		case "infos":
+			if err := func() error {
+				s.Infos = make([]string, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem string
+					v, err := d.Str()
+					elem = string(v)
+					if err != nil {
+						return err
+					}
+					s.Infos = append(s.Infos, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"infos\"")
+			}
 		case "data":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				if err := s.Data.Decode(d); err != nil {
 					return err
@@ -4213,7 +4563,7 @@ func (s *SeriesResponse) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000101,
+		0b00001001,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -4297,8 +4647,6 @@ func (s *String) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"result\"")
 			}
-		case "resultType":
-			return d.Skip()
 		default:
 			return d.Skip()
 		}
@@ -4473,8 +4821,6 @@ func (s *Vector) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"result\"")
 			}
-		case "resultType":
-			return d.Skip()
 		default:
 			return d.Skip()
 		}

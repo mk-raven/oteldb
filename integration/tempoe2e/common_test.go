@@ -9,17 +9,22 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/exp/maps"
 
+	"github.com/go-faster/oteldb/integration/requirex"
 	"github.com/go-faster/oteldb/integration/tempoe2e"
 	"github.com/go-faster/oteldb/internal/otelstorage"
 	"github.com/go-faster/oteldb/internal/tempoapi"
 	"github.com/go-faster/oteldb/internal/tempohandler"
+	"github.com/go-faster/oteldb/internal/traceql"
 	"github.com/go-faster/oteldb/internal/traceql/traceqlengine"
 	"github.com/go-faster/oteldb/internal/tracestorage"
 )
@@ -38,6 +43,7 @@ func readBatchSet(p string) (s tempoe2e.BatchSet, _ error) {
 func setupDB(
 	ctx context.Context,
 	t *testing.T,
+	provider trace.TracerProvider,
 	set tempoe2e.BatchSet,
 	inserter tracestorage.Inserter,
 	querier tracestorage.Querier,
@@ -52,16 +58,25 @@ func setupDB(
 
 	var engine *traceqlengine.Engine
 	if engineQuerier != nil {
-		engine = traceqlengine.NewEngine(engineQuerier, traceqlengine.Options{})
+		engine = traceqlengine.NewEngine(engineQuerier, traceqlengine.Options{
+			TracerProvider: provider,
+		})
 	}
-	api := tempohandler.NewTempoAPI(querier, engine)
-	tempoh, err := tempoapi.NewServer(api)
+	api := tempohandler.NewTempoAPI(querier, engine, tempohandler.TempoAPIOptions{
+		EnableAutocompleteQuery: true,
+	})
+	tempoh, err := tempoapi.NewServer(api,
+		tempoapi.WithTracerProvider(provider),
+	)
 	require.NoError(t, err)
 
 	s := httptest.NewServer(tempoh)
 	t.Cleanup(s.Close)
 
-	c, err := tempoapi.NewClient(s.URL, tempoapi.WithClient(s.Client()))
+	c, err := tempoapi.NewClient(s.URL,
+		tempoapi.WithClient(s.Client()),
+		tempoapi.WithTracerProvider(provider),
+	)
 	require.NoError(t, err)
 	return c
 }
@@ -69,6 +84,7 @@ func setupDB(
 func runTest(
 	ctx context.Context,
 	t *testing.T,
+	provider trace.TracerProvider,
 	inserter tracestorage.Inserter,
 	querier tracestorage.Querier,
 	engineQuerier traceqlengine.Querier,
@@ -79,16 +95,170 @@ func runTest(
 	require.NotEmpty(t, set.Tags)
 	require.NotEmpty(t, set.Traces)
 
-	c := setupDB(ctx, t, set, inserter, querier, engineQuerier)
+	var (
+		resourceTagNames = map[string]struct{}{}
+		spanTagNames     = map[string]struct{}{}
+	)
+	for _, tags := range set.Tags {
+		for _, tag := range tags {
+			switch tag.Scope {
+			case traceql.ScopeResource:
+				resourceTagNames[tag.Name] = struct{}{}
+			case traceql.ScopeSpan:
+				spanTagNames[tag.Name] = struct{}{}
+			default:
+				t.Fatalf("unexpected scope %v", tag.Scope)
+			}
+		}
+	}
 
+	c := setupDB(ctx, t, provider, set, inserter, querier, engineQuerier)
+	var (
+		start = tempoapi.NewOptUnixSeconds(set.Start.AsTime().Add(-time.Second))
+		end   = tempoapi.NewOptUnixSeconds(set.End.AsTime())
+	)
 	t.Run("SearchTags", func(t *testing.T) {
-		a := require.New(t)
+		for _, tt := range []struct {
+			name    string
+			params  tempoapi.SearchTagsParams
+			want    []string
+			wantErr bool
+		}{
+			{
+				"All",
+				tempoapi.SearchTagsParams{
+					Start: start,
+					End:   end,
+				},
+				maps.Keys(set.Tags),
+				false,
+			},
+			{
+				"Intrinsic",
+				tempoapi.SearchTagsParams{
+					Scope: tempoapi.NewOptTagScope(tempoapi.TagScopeIntrinsic),
+					Start: start,
+					End:   end,
+				},
+				traceql.IntrinsicNames(),
+				false,
+			},
+			{
+				"Resource",
+				tempoapi.SearchTagsParams{
+					Scope: tempoapi.NewOptTagScope(tempoapi.TagScopeResource),
+					Start: start,
+					End:   end,
+				},
+				maps.Keys(resourceTagNames),
+				false,
+			},
+			{
+				"Span",
+				tempoapi.SearchTagsParams{
+					Scope: tempoapi.NewOptTagScope(tempoapi.TagScopeSpan),
+					Start: start,
+					End:   end,
+				},
+				maps.Keys(spanTagNames),
+				false,
+			},
+		} {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				a := require.New(t)
 
-		r, err := c.SearchTags(ctx)
-		a.NoError(err)
-		a.Len(r.TagNames, len(set.Tags))
-		for _, tagName := range r.TagNames {
-			a.Contains(set.Tags, tagName)
+				r, err := c.SearchTags(ctx, tt.params)
+				if tt.wantErr {
+					var gotErr *tempoapi.ErrorStatusCode
+					a.ErrorAs(err, &gotErr)
+					return
+				}
+				a.NoError(err)
+
+				requirex.Unique(t, r.TagNames)
+				a.ElementsMatch(tt.want, r.TagNames)
+			})
+		}
+	})
+	t.Run("SearchTagsV2", func(t *testing.T) {
+		for _, tt := range []struct {
+			name    string
+			params  tempoapi.SearchTagsV2Params
+			want    map[tempoapi.TagScope][]string
+			wantErr bool
+		}{
+			{
+				"All",
+				tempoapi.SearchTagsV2Params{
+					Start: start,
+					End:   end,
+				},
+				map[tempoapi.TagScope][]string{
+					tempoapi.TagScopeIntrinsic: traceql.IntrinsicNames(),
+					tempoapi.TagScopeResource:  maps.Keys(resourceTagNames),
+					tempoapi.TagScopeSpan:      maps.Keys(spanTagNames),
+				},
+				false,
+			},
+			{
+				"Intrinsic",
+				tempoapi.SearchTagsV2Params{
+					Scope: tempoapi.NewOptTagScope(tempoapi.TagScopeIntrinsic),
+					Start: start,
+					End:   end,
+				},
+				map[tempoapi.TagScope][]string{
+					tempoapi.TagScopeIntrinsic: traceql.IntrinsicNames(),
+				},
+				false,
+			},
+			{
+				"Resource",
+				tempoapi.SearchTagsV2Params{
+					Scope: tempoapi.NewOptTagScope(tempoapi.TagScopeResource),
+					Start: start,
+					End:   end,
+				},
+				map[tempoapi.TagScope][]string{
+					tempoapi.TagScopeResource: maps.Keys(resourceTagNames),
+				},
+				false,
+			},
+			{
+				"Span",
+				tempoapi.SearchTagsV2Params{
+					Scope: tempoapi.NewOptTagScope(tempoapi.TagScopeSpan),
+					Start: start,
+					End:   end,
+				},
+				map[tempoapi.TagScope][]string{
+					tempoapi.TagScopeSpan: maps.Keys(spanTagNames),
+				},
+				false,
+			},
+		} {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				a := require.New(t)
+
+				r, err := c.SearchTagsV2(ctx, tt.params)
+				if tt.wantErr {
+					var gotErr *tempoapi.ErrorStatusCode
+					a.ErrorAs(err, &gotErr)
+					return
+				}
+				a.NoError(err)
+
+				dedup := map[tempoapi.TagScope]struct{}{}
+				for _, s := range r.Scopes {
+					a.NotContainsf(dedup, s.Name, "duplicate scope %v", s.Name)
+					dedup[s.Name] = struct{}{}
+
+					requirex.Unique(t, s.Tags)
+					a.ElementsMatch(tt.want[s.Name], s.Tags)
+				}
+			})
 		}
 	})
 	t.Run("SearchTagValues", func(t *testing.T) {
@@ -100,7 +270,11 @@ func runTest(
 				tagValues[t.Value] = struct{}{}
 			}
 
-			r, err := c.SearchTagValues(ctx, tempoapi.SearchTagValuesParams{TagName: tagName})
+			r, err := c.SearchTagValues(ctx, tempoapi.SearchTagValuesParams{
+				TagName: tagName,
+				Start:   start,
+				End:     end,
+			})
 			a.NoError(err)
 			a.Len(r.TagValues, len(tagValues))
 			for _, val := range r.TagValues {
@@ -109,20 +283,222 @@ func runTest(
 		}
 	})
 	t.Run("SearchTagValuesV2", func(t *testing.T) {
-		a := require.New(t)
+		t.Run("Attribute", func(t *testing.T) {
+			a := require.New(t)
 
-		for tagName, tags := range set.Tags {
-			tagValues := map[string]struct{}{}
-			for _, t := range tags {
-				tagValues[t.Value] = struct{}{}
-			}
+			for tagName, tags := range set.Tags {
+				tagValues := map[string]struct{}{}
+				for _, t := range tags {
+					tagValues[t.Value] = struct{}{}
+				}
 
-			r, err := c.SearchTagValuesV2(ctx, tempoapi.SearchTagValuesV2Params{TagName: tagName})
-			a.NoError(err)
-			a.Len(r.TagValues, len(tagValues))
-			for _, val := range r.TagValues {
-				a.Containsf(tagValues, val.Value, "check tag %q", tagName)
+				r, err := c.SearchTagValuesV2(ctx, tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: "." + tagName,
+					Start:             start,
+					End:               end,
+				})
+				a.NoError(err)
+				a.Len(r.TagValues, len(tagValues))
+				for _, val := range r.TagValues {
+					a.Containsf(tagValues, val.Value, "check tag %q", tagName)
+				}
 			}
+		})
+
+		serviceNames := map[string]struct{}{}
+		for _, t := range set.Tags["service.name"] {
+			serviceNames[t.Value] = struct{}{}
+		}
+
+		for _, tt := range []struct {
+			name     string
+			params   tempoapi.SearchTagValuesV2Params
+			wantType string
+			want     []string
+			wantErr  bool
+		}{
+			// Resource attribute.
+			{
+				"ResourceAttribute",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `resource.service.name`,
+					Start:             start,
+					End:               end,
+				},
+				"string",
+				maps.Keys(serviceNames),
+				false,
+			},
+			// Intrinsics.
+			{
+				"SpanDuration",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `duration`,
+					Start:             start,
+					End:               end,
+				},
+				"duration",
+				nil,
+				false,
+			},
+			{
+				"SpanChildCount",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `childCount`,
+					Start:             start,
+					End:               end,
+				},
+				"integer",
+				nil,
+				false,
+			},
+			{
+				"SpanName",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `name`,
+					Start:             start,
+					End:               end,
+				},
+				"string",
+				maps.Keys(set.SpanNames),
+				false,
+			},
+			{
+				"SpanNameWithQuery",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `name`,
+					Start:             start,
+					End:               end,
+					Q:                 tempoapi.NewOptString(`{ name = "authenticate" && .service.name = }`),
+				},
+				"string",
+				[]string{"authenticate"},
+				false,
+			},
+			{
+				"SpanStatus",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `status`,
+					Start:             start,
+					End:               end,
+				},
+				"keyword",
+				[]string{
+					"unset",
+					"ok",
+					"error",
+				},
+				false,
+			},
+			{
+				"SpanKind",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `kind`,
+					Start:             start,
+					End:               end,
+				},
+				"keyword",
+				[]string{
+					"unspecified",
+					"internal",
+					"server",
+					"client",
+					"producer",
+					"consumer",
+				},
+				false,
+			},
+			{
+				"SpanParent",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `parent`,
+					Start:             start,
+					End:               end,
+				},
+				"string",
+				nil,
+				false,
+			},
+			{
+				"RootSpanName",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `rootName`,
+					Start:             start,
+					End:               end,
+				},
+				"string",
+				maps.Keys(set.RootSpanNames),
+				false,
+			},
+			{
+				"RootSpanNameWithQuery",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `rootName`,
+					Start:             start,
+					End:               end,
+					Q:                 tempoapi.NewOptString(`{ name = "list-articles" }`),
+				},
+				"string",
+				[]string{"list-articles"},
+				false,
+			},
+			{
+				// Ensure that `rootName` would return nothing if we query a
+				// non-root span.
+				"RootSpanNameNoMatch",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `rootName`,
+					Start:             start,
+					End:               end,
+					Q:                 tempoapi.NewOptString(`{ name = "authenticate" }`),
+				},
+				"string",
+				nil,
+				false,
+			},
+			{
+				"RootServiceName",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `rootServiceName`,
+					Start:             start,
+					End:               end,
+				},
+				"string",
+				maps.Keys(serviceNames),
+				false,
+			},
+			{
+				"TraceDuration",
+				tempoapi.SearchTagValuesV2Params{
+					AttributeSelector: `traceDuration`,
+					Start:             start,
+					End:               end,
+				},
+				"duration",
+				nil,
+				false,
+			},
+		} {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				a := require.New(t)
+
+				r, err := c.SearchTagValuesV2(ctx, tt.params)
+				if tt.wantErr {
+					var gotErr *tempoapi.ErrorStatusCode
+					a.ErrorAs(err, &gotErr)
+					return
+				}
+				a.NoError(err)
+
+				var got []string
+				for _, v := range r.TagValues {
+					a.Equal(tt.wantType, v.Type)
+					got = append(got, v.Value)
+				}
+				requirex.Unique(t, got)
+				a.ElementsMatch(tt.want, got)
+			})
 		}
 	})
 	t.Run("TraceByID", func(t *testing.T) {
@@ -217,12 +593,10 @@ func runTest(
 			a.Equal(int64(expectSpan.StartTimestamp()), start)
 			a.Equal(int64(expectSpan.EndTimestamp()), end)
 
-			gotAttrs := gotSpan.Attributes
-			if expectAttrs := expectSpan.Attributes(); expectAttrs.Len() > 0 {
-				// TODO(tdakkota): do a full attributes comparison.
-				a.NotNil(gotSpan.Attributes)
-				a.Len(gotAttrs, expectAttrs.Len())
-			}
+			a.Equal(
+				getRawMapFromAPI(gotSpan.Attributes),
+				expectSpan.Attributes().AsRaw(),
+			)
 		}
 	}
 
@@ -373,6 +747,14 @@ func runTest(
 				// Ensure that engine properly handles types mismatch.
 				{`{ .http.status_code = "200" }`, nil},
 				{`{ .http.status_code =~ "^POST$" }`, nil},
+				// Search materialized attributes.
+				{`{ duration < 0s }`, nil},
+				{`{ name = "clearly-does-not-exist" }`, nil},
+				{`{ status = ok && status = error }`, nil},
+				{`{ kind = client && kind = server }`, nil},
+				{`{ .service.namespace = "clearly-does-not-exist" }`, nil},
+				{`{ .service.name = "clearly-does-not-exist" }`, nil},
+				{`{ .service.instance.id = "clearly-does-not-exist" }`, nil},
 			}
 			for i, tt := range queries {
 				tt := tt
@@ -438,7 +820,7 @@ func runTest(
 						if _, ok := inMemory[metadata.TraceID]; ok {
 							continue
 						}
-						t.Logf("[%q]: unexpexted", metadata.TraceID)
+						t.Logf("[%q]: unexpected", metadata.TraceID)
 					}
 					for _, metadata := range r2.Traces {
 						if _, ok := got[metadata.TraceID]; ok {
@@ -476,6 +858,40 @@ func runTest(
 	})
 }
 
+func getRawMapFromAPI(obj []tempoapi.KeyValue) map[string]any {
+	r := make(map[string]any, len(obj))
+	for _, kv := range obj {
+		r[kv.Key] = getRawValueFromAPI(kv.Value)
+	}
+	return r
+}
+
+func getRawValueFromAPI(val tempoapi.AnyValue) any {
+	switch val.Type {
+	case tempoapi.StringValueAnyValue:
+		return val.StringValue.StringValue
+	case tempoapi.BoolValueAnyValue:
+		return val.BoolValue.BoolValue
+	case tempoapi.IntValueAnyValue:
+		return val.IntValue.IntValue
+	case tempoapi.DoubleValueAnyValue:
+		return val.DoubleValue.DoubleValue
+	case tempoapi.ArrayValueAnyValue:
+		arr := val.ArrayValue.ArrayValue
+		r := make([]any, len(arr))
+		for i, val := range arr {
+			r[i] = getRawValueFromAPI(val)
+		}
+		return arr
+	case tempoapi.KvlistValueAnyValue:
+		return getRawMapFromAPI(val.KvlistValue.KvlistValue)
+	case tempoapi.BytesValueAnyValue:
+		return val.BytesValue.BytesValue
+	default:
+		panic(fmt.Sprintf("unexpected type %#v", val.Type))
+	}
+}
+
 type selectedSpans = map[pcommon.TraceID]map[pcommon.SpanID]struct{}
 
 type selector interface {
@@ -509,7 +925,7 @@ func selectSpans(set tempoe2e.BatchSet, sel selector) (result selectedSpans) {
 	return selectSpansets(set, false, sel)
 }
 
-func selectSpansets(set tempoe2e.BatchSet, any bool, sel selector) (result selectedSpans) {
+func selectSpansets(set tempoe2e.BatchSet, matchByTrace bool, sel selector) (result selectedSpans) {
 	addSpan := func(traceID pcommon.TraceID, spanID pcommon.SpanID) {
 		m, ok := result[traceID]
 		if !ok {
@@ -529,7 +945,7 @@ func selectSpansets(set tempoe2e.BatchSet, any bool, sel selector) (result selec
 			}
 		}
 		// Add all spans to expected set.
-		if any && anyMatch {
+		if matchByTrace && anyMatch {
 			for _, span := range trace.Spanset {
 				addSpan(traceID, span.SpanID())
 			}

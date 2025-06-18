@@ -14,7 +14,7 @@ import (
 	"github.com/go-faster/sdk/zctx"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
-	"go.uber.org/zap/zaptest"
+	testcontainerslog "github.com/testcontainers/testcontainers-go/log"
 
 	"github.com/go-faster/oteldb/integration"
 	"github.com/go-faster/oteldb/internal/chstorage"
@@ -29,16 +29,17 @@ func randomPrefix() string {
 func TestCH(t *testing.T) {
 	integration.Skip(t)
 	ctx := context.Background()
+	provider := integration.TraceProvider(t)
 
 	req := testcontainers.ContainerRequest{
 		Name:         "oteldb-lokie2e-clickhouse",
-		Image:        "clickhouse/clickhouse-server:23.10",
+		Image:        "clickhouse/clickhouse-server:23.12",
 		ExposedPorts: []string{"8123/tcp", "9000/tcp"},
 	}
 	chContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
-		Logger:           testcontainers.TestLogger(t),
+		Logger:           testcontainerslog.TestLogger(t),
 		Reuse:            true,
 	})
 	require.NoError(t, err, "container start")
@@ -49,6 +50,9 @@ func TestCH(t *testing.T) {
 	opts := ch.Options{
 		Address:  endpoint,
 		Database: "default",
+
+		OpenTelemetryInstrumentation: true,
+		TracerProvider:               provider,
 	}
 
 	connectBackoff := backoff.NewExponentialBackOff()
@@ -69,6 +73,7 @@ func TestCH(t *testing.T) {
 
 	prefix := randomPrefix()
 	tables := chstorage.DefaultTables()
+	tables.TTL = time.Since(time.Date(2010, 1, 1, 1, 1, 1, 1, time.UTC))
 	tables.Each(func(name *string) error {
 		old := *name
 		*name = prefix + "_" + old
@@ -77,7 +82,6 @@ func TestCH(t *testing.T) {
 	t.Logf("Test tables prefix: %s", prefix)
 	require.NoError(t, tables.Create(ctx, c))
 
-	provider := integration.NewProvider()
 	inserter, err := chstorage.NewInserter(c, chstorage.InserterOptions{
 		Tables:         tables,
 		TracerProvider: provider,
@@ -90,6 +94,6 @@ func TestCH(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctx = zctx.Base(ctx, zaptest.NewLogger(t))
+	ctx = zctx.Base(ctx, integration.Logger(t))
 	runTest(ctx, t, provider, inserter, querier, querier)
 }

@@ -29,7 +29,7 @@ jobs:
           echo "modcache=$(go env GOMODCACHE)" >> $GITHUB_ENV
 
       - name: Set up cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ${{ env.cache }}
@@ -69,6 +69,7 @@ jobs:
           name: coverage
 
       - name: Send coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         with:
-          file: profile.out
+          files: profile.out
+          fail_ci_if_error: true

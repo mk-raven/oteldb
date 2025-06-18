@@ -2,6 +2,9 @@ package chstorage
 
 import (
 	"github.com/ClickHouse/ch-go/proto"
+
+	"github.com/go-faster/oteldb/internal/chstorage/chsql"
+	"github.com/go-faster/oteldb/internal/ddl"
 )
 
 type pointColumns struct {
@@ -12,110 +15,92 @@ type pointColumns struct {
 	value   proto.ColFloat64
 
 	flags      proto.ColUInt8
-	attributes proto.ColStr
-	resource   proto.ColStr
+	attributes *Attributes
+	scope      *Attributes
+	resource   *Attributes
 }
 
 func newPointColumns() *pointColumns {
 	return &pointColumns{
 		name:      new(proto.ColStr).LowCardinality(),
 		timestamp: new(proto.ColDateTime64).WithPrecision(proto.PrecisionNano),
+
+		attributes: NewAttributes(colAttrs),
+		scope:      NewAttributes(colScope),
+		resource:   NewAttributes(colResource),
 	}
 }
 
-func (c *pointColumns) Input() proto.Input {
-	return proto.Input{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
+func (c *pointColumns) Columns() Columns {
+	return MergeColumns(
+		Columns{
+			{Name: "name", Data: c.name},
+			{Name: "timestamp", Data: c.timestamp},
 
-		{Name: "mapping", Data: proto.Wrap(&c.mapping, metricMappingDDL)},
-		{Name: "value", Data: c.value},
+			{Name: "mapping", Data: proto.Wrap(&c.mapping, metricMappingDDL)},
+			{Name: "value", Data: &c.value},
 
-		{Name: "flags", Data: c.flags},
-		{Name: "attributes", Data: c.attributes},
-		{Name: "resource", Data: c.resource},
-	}
+			{Name: "flags", Data: &c.flags},
+		},
+		c.attributes.Columns(),
+		c.scope.Columns(),
+		c.resource.Columns(),
+	)
 }
 
-func (c *pointColumns) Result() proto.Results {
-	results := proto.Results{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
+func (c *pointColumns) Input() proto.Input                { return c.Columns().Input() }
+func (c *pointColumns) Result() proto.Results             { return c.Columns().Result() }
+func (c *pointColumns) ChsqlResult() []chsql.ResultColumn { return c.Columns().ChsqlResult() }
 
-		{Name: "mapping", Data: &c.mapping},
-		{Name: "value", Data: &c.value},
-
-		{Name: "flags", Data: &c.flags},
-		{Name: "attributes", Data: &c.attributes},
-		{Name: "resource", Data: &c.resource},
+func (c *pointColumns) DDL() ddl.Table {
+	table := ddl.Table{
+		Engine:      "MergeTree",
+		PartitionBy: "toYYYYMMDD(timestamp)",
+		PrimaryKey:  []string{"name", "mapping", "resource", "attribute"},
+		OrderBy:     []string{"name", "mapping", "resource", "attribute", "timestamp"},
+		TTL:         ddl.TTL{Field: "timestamp"},
+		Indexes: []ddl.Index{
+			{
+				Name:        "idx_ts",
+				Target:      "timestamp",
+				Type:        "minmax",
+				Granularity: 8192,
+			},
+		},
+		Columns: []ddl.Column{
+			{
+				Name:  "name",
+				Type:  c.name.Type(),
+				Codec: "ZSTD(1)",
+			},
+			{
+				Name:  "timestamp",
+				Type:  c.timestamp.Type(),
+				Codec: "Delta, ZSTD(1)",
+			},
+			{
+				Name:  "mapping",
+				Type:  c.mapping.Type().Sub(metricMappingDDL),
+				Codec: "T64, ZSTD(1)",
+			},
+			{
+				Name:  "value",
+				Type:  c.value.Type(),
+				Codec: "Gorilla, ZSTD(1)",
+			},
+			{
+				Name:  "flags",
+				Type:  c.flags.Type(),
+				Codec: "T64, ZSTD(1)",
+			},
+		},
 	}
 
-	return results
-}
+	c.attributes.DDL(&table)
+	c.resource.DDL(&table)
+	c.scope.DDL(&table)
 
-type histogramColumns struct {
-	name      *proto.ColLowCardinality[string]
-	timestamp *proto.ColDateTime64
-
-	count          proto.ColUInt64
-	sum            *proto.ColNullable[float64]
-	min            *proto.ColNullable[float64]
-	max            *proto.ColNullable[float64]
-	bucketCounts   *proto.ColArr[uint64]
-	explicitBounds *proto.ColArr[float64]
-
-	flags      proto.ColUInt32
-	attributes proto.ColStr
-	resource   proto.ColStr
-}
-
-func newHistogramColumns() *histogramColumns {
-	return &histogramColumns{
-		name:      new(proto.ColStr).LowCardinality(),
-		timestamp: new(proto.ColDateTime64).WithPrecision(proto.PrecisionNano),
-
-		sum:            new(proto.ColFloat64).Nullable(),
-		min:            new(proto.ColFloat64).Nullable(),
-		max:            new(proto.ColFloat64).Nullable(),
-		bucketCounts:   new(proto.ColUInt64).Array(),
-		explicitBounds: new(proto.ColFloat64).Array(),
-	}
-}
-
-func (c *histogramColumns) Input() proto.Input {
-	return proto.Input{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
-
-		{Name: "histogram_count", Data: c.count},
-		{Name: "histogram_sum", Data: c.sum},
-		{Name: "histogram_min", Data: c.min},
-		{Name: "histogram_max", Data: c.max},
-		{Name: "histogram_bucket_counts", Data: c.bucketCounts},
-		{Name: "histogram_explicit_bounds", Data: c.explicitBounds},
-
-		{Name: "flags", Data: c.flags},
-		{Name: "attributes", Data: c.attributes},
-		{Name: "resource", Data: c.resource},
-	}
-}
-
-func (c *histogramColumns) Result() proto.Results {
-	return proto.Results{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
-
-		{Name: "histogram_count", Data: &c.count},
-		{Name: "histogram_sum", Data: c.sum},
-		{Name: "histogram_min", Data: c.min},
-		{Name: "histogram_max", Data: c.max},
-		{Name: "histogram_bucket_counts", Data: c.bucketCounts},
-		{Name: "histogram_explicit_bounds", Data: c.explicitBounds},
-
-		{Name: "flags", Data: &c.flags},
-		{Name: "attributes", Data: &c.attributes},
-		{Name: "resource", Data: &c.resource},
-	}
+	return table
 }
 
 type expHistogramColumns struct {
@@ -133,9 +118,10 @@ type expHistogramColumns struct {
 	negativeOffset       proto.ColInt32
 	negativeBucketCounts *proto.ColArr[uint64]
 
-	flags      proto.ColUInt32
-	attributes proto.ColStr
-	resource   proto.ColStr
+	flags      proto.ColUInt8
+	attributes *Attributes
+	scope      *Attributes
+	resource   *Attributes
 }
 
 func newExpHistogramColumns() *expHistogramColumns {
@@ -148,137 +134,154 @@ func newExpHistogramColumns() *expHistogramColumns {
 		max:                  new(proto.ColFloat64).Nullable(),
 		positiveBucketCounts: new(proto.ColUInt64).Array(),
 		negativeBucketCounts: new(proto.ColUInt64).Array(),
+
+		attributes: NewAttributes(colAttrs),
+		scope:      NewAttributes(colScope),
+		resource:   NewAttributes(colResource),
 	}
 }
 
-func (c *expHistogramColumns) Input() proto.Input {
-	return proto.Input{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
+func (c *expHistogramColumns) Columns() Columns {
+	return MergeColumns(
+		Columns{
+			{Name: "name", Data: c.name},
+			{Name: "timestamp", Data: c.timestamp},
 
-		{Name: "exp_histogram_count", Data: c.count},
-		{Name: "exp_histogram_sum", Data: c.sum},
-		{Name: "exp_histogram_min", Data: c.min},
-		{Name: "exp_histogram_max", Data: c.max},
-		{Name: "exp_histogram_scale", Data: c.scale},
-		{Name: "exp_histogram_zerocount", Data: c.zerocount},
-		{Name: "exp_histogram_positive_offset", Data: c.positiveOffset},
-		{Name: "exp_histogram_positive_bucket_counts", Data: c.positiveBucketCounts},
-		{Name: "exp_histogram_negative_offset", Data: c.negativeOffset},
-		{Name: "exp_histogram_negative_bucket_counts", Data: c.negativeBucketCounts},
+			{Name: "exp_histogram_count", Data: &c.count},
+			{Name: "exp_histogram_sum", Data: c.sum},
+			{Name: "exp_histogram_min", Data: c.min},
+			{Name: "exp_histogram_max", Data: c.max},
+			{Name: "exp_histogram_scale", Data: &c.scale},
+			{Name: "exp_histogram_zerocount", Data: &c.zerocount},
+			{Name: "exp_histogram_positive_offset", Data: &c.positiveOffset},
+			{Name: "exp_histogram_positive_bucket_counts", Data: c.positiveBucketCounts},
+			{Name: "exp_histogram_negative_offset", Data: &c.negativeOffset},
+			{Name: "exp_histogram_negative_bucket_counts", Data: c.negativeBucketCounts},
 
-		{Name: "flags", Data: c.flags},
-		{Name: "attributes", Data: c.attributes},
-		{Name: "resource", Data: c.resource},
-	}
+			{Name: "flags", Data: &c.flags},
+		},
+		c.attributes.Columns(),
+		c.scope.Columns(),
+		c.resource.Columns(),
+	)
 }
 
-func (c *expHistogramColumns) Result() proto.Results {
-	return proto.Results{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
+func (c *expHistogramColumns) Input() proto.Input                { return c.Columns().Input() }
+func (c *expHistogramColumns) Result() proto.Results             { return c.Columns().Result() }
+func (c *expHistogramColumns) ChsqlResult() []chsql.ResultColumn { return c.Columns().ChsqlResult() }
 
-		{Name: "exp_histogram_count", Data: &c.count},
-		{Name: "exp_histogram_sum", Data: c.sum},
-		{Name: "exp_histogram_min", Data: c.min},
-		{Name: "exp_histogram_max", Data: c.max},
-		{Name: "exp_histogram_scale", Data: &c.scale},
-		{Name: "exp_histogram_zerocount", Data: &c.zerocount},
-		{Name: "exp_histogram_positive_offset", Data: &c.positiveOffset},
-		{Name: "exp_histogram_positive_bucket_counts", Data: c.positiveBucketCounts},
-		{Name: "exp_histogram_negative_offset", Data: &c.negativeOffset},
-		{Name: "exp_histogram_negative_bucket_counts", Data: c.negativeBucketCounts},
-
-		{Name: "flags", Data: &c.flags},
-		{Name: "attributes", Data: &c.attributes},
-		{Name: "resource", Data: &c.resource},
+func (c *expHistogramColumns) DDL() ddl.Table {
+	table := ddl.Table{
+		Engine:      "MergeTree",
+		PartitionBy: "toYYYYMMDD(timestamp)",
+		OrderBy:     []string{"timestamp"},
+		Columns: []ddl.Column{
+			{
+				Name:  "name",
+				Type:  c.name.Type(),
+				Codec: "ZSTD(1)",
+			},
+			{
+				Name:  "timestamp",
+				Type:  c.timestamp.Type(),
+				Codec: "Delta, ZSTD(1)",
+			},
+			{
+				Name: "exp_histogram_count",
+				Type: c.count.Type(),
+			},
+			{
+				Name: "exp_histogram_sum",
+				Type: c.sum.Type(),
+			},
+			{
+				Name: "exp_histogram_min",
+				Type: c.min.Type(),
+			},
+			{
+				Name: "exp_histogram_max",
+				Type: c.max.Type(),
+			},
+			{
+				Name: "exp_histogram_scale",
+				Type: c.scale.Type(),
+			},
+			{
+				Name: "exp_histogram_zerocount",
+				Type: c.zerocount.Type(),
+			},
+			{
+				Name: "exp_histogram_positive_offset",
+				Type: c.positiveOffset.Type(),
+			},
+			{
+				Name: "exp_histogram_positive_bucket_counts",
+				Type: c.positiveBucketCounts.Type(),
+			},
+			{
+				Name: "exp_histogram_negative_offset",
+				Type: c.negativeOffset.Type(),
+			},
+			{
+				Name: "exp_histogram_negative_bucket_counts",
+				Type: c.negativeBucketCounts.Type(),
+			},
+			{
+				Name:  "flags",
+				Type:  c.flags.Type(),
+				Codec: "T64, ZSTD(1)",
+			},
+		},
 	}
-}
 
-type summaryColumns struct {
-	name      *proto.ColLowCardinality[string]
-	timestamp *proto.ColDateTime64
+	c.attributes.DDL(&table)
+	c.resource.DDL(&table)
+	c.scope.DDL(&table)
 
-	count     proto.ColUInt64
-	sum       proto.ColFloat64
-	quantiles *proto.ColArr[float64]
-	values    *proto.ColArr[float64]
-
-	flags      proto.ColUInt32
-	attributes proto.ColStr
-	resource   proto.ColStr
-}
-
-func newSummaryColumns() *summaryColumns {
-	return &summaryColumns{
-		name:      new(proto.ColStr).LowCardinality(),
-		timestamp: new(proto.ColDateTime64).WithPrecision(proto.PrecisionNano),
-
-		quantiles: new(proto.ColFloat64).Array(),
-		values:    new(proto.ColFloat64).Array(),
-	}
-}
-
-func (c *summaryColumns) Input() proto.Input {
-	input := proto.Input{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
-
-		{Name: "summary_count", Data: c.count},
-		{Name: "summary_sum", Data: c.sum},
-		{Name: "summary_quantiles", Data: c.quantiles},
-		{Name: "summary_values", Data: c.values},
-
-		{Name: "flags", Data: c.flags},
-		{Name: "attributes", Data: c.attributes},
-		{Name: "resource", Data: c.resource},
-	}
-	return input
-}
-
-func (c *summaryColumns) Result() proto.Results {
-	return proto.Results{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
-
-		{Name: "summary_count", Data: &c.count},
-		{Name: "summary_sum", Data: &c.sum},
-		{Name: "summary_quantiles", Data: c.quantiles},
-		{Name: "summary_values", Data: c.values},
-
-		{Name: "flags", Data: &c.flags},
-		{Name: "attributes", Data: &c.attributes},
-		{Name: "resource", Data: &c.resource},
-	}
+	return table
 }
 
 type labelsColumns struct {
 	name  *proto.ColLowCardinality[string]
-	key   *proto.ColLowCardinality[string]
 	value proto.ColStr
+	scope proto.ColEnum8
 }
 
 func newLabelsColumns() *labelsColumns {
 	return &labelsColumns{
 		name: new(proto.ColStr).LowCardinality(),
-		key:  new(proto.ColStr).LowCardinality(),
 	}
 }
 
-func (c *labelsColumns) Input() proto.Input {
-	input := proto.Input{
+func (c *labelsColumns) Columns() Columns {
+	return Columns{
 		{Name: "name", Data: c.name},
-		{Name: "key", Data: c.key},
-		{Name: "value", Data: c.value},
-	}
-	return input
-}
-
-func (c *labelsColumns) Result() proto.Results {
-	return proto.Results{
-		{Name: "name", Data: c.name},
-		{Name: "key", Data: c.key},
 		{Name: "value", Data: &c.value},
+		{Name: "scope", Data: proto.Wrap(&c.scope, metricLabelScopeDDL)},
+	}
+}
+func (c *labelsColumns) Input() proto.Input                { return c.Columns().Input() }
+func (c *labelsColumns) Result() proto.Results             { return c.Columns().Result() }
+func (c *labelsColumns) ChsqlResult() []chsql.ResultColumn { return c.Columns().ChsqlResult() }
+
+func (c *labelsColumns) DDL() ddl.Table {
+	return ddl.Table{
+		Engine:  "ReplacingMergeTree",
+		OrderBy: []string{"name", "value", "scope"},
+		Columns: []ddl.Column{
+			{
+				Name: "name",
+				Type: c.name.Type(),
+			},
+			{
+				Name: "value",
+				Type: c.value.Type(),
+			},
+			{
+				Name: "scope",
+				Type: c.scope.Type().Sub(metricLabelScopeDDL),
+			},
+		},
 	}
 }
 
@@ -286,14 +289,15 @@ type exemplarColumns struct {
 	name      *proto.ColLowCardinality[string]
 	timestamp *proto.ColDateTime64
 
-	filteredAttributes proto.ColStr
+	filteredAttributes proto.ColBytes
 	exemplarTimestamp  *proto.ColDateTime64
 	value              proto.ColFloat64
 	spanID             proto.ColFixedStr8
 	traceID            proto.ColFixedStr16
 
-	attributes proto.ColStr
-	resource   proto.ColStr
+	attributes *Attributes
+	scope      *Attributes
+	resource   *Attributes
 }
 
 func newExemplarColumns() *exemplarColumns {
@@ -301,38 +305,76 @@ func newExemplarColumns() *exemplarColumns {
 		name:              new(proto.ColStr).LowCardinality(),
 		timestamp:         new(proto.ColDateTime64).WithPrecision(proto.PrecisionNano),
 		exemplarTimestamp: new(proto.ColDateTime64).WithPrecision(proto.PrecisionNano),
+		attributes:        NewAttributes(colAttrs),
+		scope:             NewAttributes(colScope),
+		resource:          NewAttributes(colResource),
 	}
 }
 
-func (c *exemplarColumns) Input() proto.Input {
-	input := proto.Input{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
+func (c *exemplarColumns) Columns() Columns {
+	return MergeColumns(
+		Columns{
+			{Name: "name", Data: c.name},
+			{Name: "timestamp", Data: c.timestamp},
 
-		{Name: "filtered_attributes", Data: c.filteredAttributes},
-		{Name: "exemplar_timestamp", Data: c.exemplarTimestamp},
-		{Name: "value", Data: c.value},
-		{Name: "span_id", Data: c.spanID},
-		{Name: "trace_id", Data: c.traceID},
-
-		{Name: "attributes", Data: &c.attributes},
-		{Name: "resource", Data: &c.resource},
-	}
-	return input
+			{Name: "filtered_attributes", Data: &c.filteredAttributes},
+			{Name: "exemplar_timestamp", Data: c.exemplarTimestamp},
+			{Name: "value", Data: &c.value},
+			{Name: "span_id", Data: &c.spanID},
+			{Name: "trace_id", Data: &c.traceID},
+		},
+		c.attributes.Columns(),
+		c.scope.Columns(),
+		c.resource.Columns(),
+	)
 }
 
-func (c *exemplarColumns) Result() proto.Results {
-	return proto.Results{
-		{Name: "name", Data: c.name},
-		{Name: "timestamp", Data: c.timestamp},
+func (c *exemplarColumns) Input() proto.Input                { return c.Columns().Input() }
+func (c *exemplarColumns) Result() proto.Results             { return c.Columns().Result() }
+func (c *exemplarColumns) ChsqlResult() []chsql.ResultColumn { return c.Columns().ChsqlResult() }
 
-		{Name: "filtered_attributes", Data: &c.filteredAttributes},
-		{Name: "exemplar_timestamp", Data: c.exemplarTimestamp},
-		{Name: "value", Data: &c.value},
-		{Name: "span_id", Data: &c.spanID},
-		{Name: "trace_id", Data: &c.traceID},
-
-		{Name: "attributes", Data: &c.attributes},
-		{Name: "resource", Data: &c.resource},
+func (c *exemplarColumns) DDL() ddl.Table {
+	table := ddl.Table{
+		Engine:      "MergeTree",
+		PartitionBy: "toYYYYMMDD(timestamp)",
+		OrderBy:     []string{"name", "resource", "attribute", "timestamp"},
+		Columns: []ddl.Column{
+			{
+				Name: "name",
+				Type: c.name.Type(),
+			},
+			{
+				Name:  "timestamp",
+				Type:  c.timestamp.Type(),
+				Codec: "Delta, ZSTD(1)",
+			},
+			{
+				Name: "filtered_attributes",
+				Type: c.filteredAttributes.Type(),
+			},
+			{
+				Name:  "exemplar_timestamp",
+				Type:  c.exemplarTimestamp.Type(),
+				Codec: "Delta, ZSTD(1)",
+			},
+			{
+				Name: "value",
+				Type: c.value.Type(),
+			},
+			{
+				Name: "trace_id",
+				Type: c.traceID.Type(),
+			},
+			{
+				Name: "span_id",
+				Type: c.spanID.Type(),
+			},
+		},
 	}
+
+	c.attributes.DDL(&table)
+	c.resource.DDL(&table)
+	c.scope.DDL(&table)
+
+	return table
 }

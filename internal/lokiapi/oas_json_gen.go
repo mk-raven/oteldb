@@ -805,8 +805,6 @@ func (s *MatrixResult) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"stats\"")
 			}
-		case "resultType":
-			return d.Skip()
 		default:
 			return d.Skip()
 		}
@@ -1092,22 +1090,70 @@ func (s QueryResponseData) Encode(e *jx.Encoder) {
 
 func (s QueryResponseData) encodeFields(e *jx.Encoder) {
 	switch s.Type {
-	case MatrixResultQueryResponseData:
-		e.FieldStart("resultType")
-		e.Str("matrix")
-		s.MatrixResult.encodeFields(e)
-	case ScalarResultQueryResponseData:
-		e.FieldStart("resultType")
-		e.Str("scalar")
-		s.ScalarResult.encodeFields(e)
 	case StreamsResultQueryResponseData:
 		e.FieldStart("resultType")
 		e.Str("streams")
-		s.StreamsResult.encodeFields(e)
+		{
+			s := s.StreamsResult
+			{
+				e.FieldStart("result")
+				s.Result.Encode(e)
+			}
+			{
+				if s.Stats != nil {
+					e.FieldStart("stats")
+					s.Stats.Encode(e)
+				}
+			}
+		}
+	case ScalarResultQueryResponseData:
+		e.FieldStart("resultType")
+		e.Str("scalar")
+		{
+			s := s.ScalarResult
+			{
+				e.FieldStart("result")
+				s.Result.Encode(e)
+			}
+			{
+				if s.Stats != nil {
+					e.FieldStart("stats")
+					s.Stats.Encode(e)
+				}
+			}
+		}
 	case VectorResultQueryResponseData:
 		e.FieldStart("resultType")
 		e.Str("vector")
-		s.VectorResult.encodeFields(e)
+		{
+			s := s.VectorResult
+			{
+				e.FieldStart("result")
+				s.Result.Encode(e)
+			}
+			{
+				if s.Stats != nil {
+					e.FieldStart("stats")
+					s.Stats.Encode(e)
+				}
+			}
+		}
+	case MatrixResultQueryResponseData:
+		e.FieldStart("resultType")
+		e.Str("matrix")
+		{
+			s := s.MatrixResult
+			{
+				e.FieldStart("result")
+				s.Result.Encode(e)
+			}
+			{
+				if s.Stats != nil {
+					e.FieldStart("stats")
+					s.Stats.Encode(e)
+				}
+			}
+		}
 	}
 }
 
@@ -1134,17 +1180,17 @@ func (s *QueryResponseData) Decode(d *jx.Decoder) error {
 					return err
 				}
 				switch typ {
-				case "matrix":
-					s.Type = MatrixResultQueryResponseData
+				case "streams":
+					s.Type = StreamsResultQueryResponseData
 					found = true
 				case "scalar":
 					s.Type = ScalarResultQueryResponseData
 					found = true
-				case "streams":
-					s.Type = StreamsResultQueryResponseData
-					found = true
 				case "vector":
 					s.Type = VectorResultQueryResponseData
+					found = true
+				case "matrix":
+					s.Type = MatrixResultQueryResponseData
 					found = true
 				default:
 					return errors.Errorf("unknown type %s", typ)
@@ -1363,8 +1409,6 @@ func (s *ScalarResult) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"stats\"")
 			}
-		case "resultType":
-			return d.Skip()
 		default:
 			return d.Skip()
 		}
@@ -1786,8 +1830,6 @@ func (s *StreamsResult) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"stats\"")
 			}
-		case "resultType":
-			return d.Skip()
 		default:
 			return d.Skip()
 		}
@@ -2077,8 +2119,6 @@ func (s *VectorResult) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"stats\"")
 			}
-		case "resultType":
-			return d.Skip()
 		default:
 			return d.Skip()
 		}

@@ -2,29 +2,34 @@ version: "3"
 
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:23.10
+    image: "ghcr.io/go-faster/clickhouse-server:23.12"
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:8123:8123"
     volumes:
       - ./clickhouse.xml:/etc/clickhouse-server/config.d/monitoring.xml
     healthcheck:
-      test: ['CMD', 'wget', '--spider', '-q', '127.0.0.1:8123/ping']
+      test: ["CMD", "wget", "--spider", "-q", "127.0.0.1:8123/ping"]
       interval: 1s
       timeout: 1s
       retries: 30
 
-  attacker:
+  generator:
+    image: ghcr.io/go-faster/oteldb/otelbench
     build:
       context: ../../../
-      dockerfile: prombench.Dockerfile
+      dockerfile: otelbench.Dockerfile
     environment:
       - OTEL_LOG_LEVEL=info
       - OTEL_METRICS_EXPORTER=none
       - OTEL_LOGS_EXPORTER=none
       - OTEL_TRACES_EXPORTER=none
-      - OTEL_RESOURCE_ATTRIBUTES=service.name=attacker
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=otelbench.promrw
+      - GOMAXPROCS=3
+      - GOMEMLIMIT=2GiB
     command:
+      - promrw
+      - bench
       - --scrapeInterval=5s
       - --targetsCount=500
       - --scrapeConfigUpdateInterval=1m
@@ -37,6 +42,7 @@ services:
       - oteldb
 
   oteldb:
+    image: ghcr.io/go-faster/oteldb
     build:
       context: ../../../
       dockerfile: Dockerfile
@@ -49,13 +55,15 @@ services:
       - OTEL_TRACES_EXPORTER=none
       - OTEL_RESOURCE_ATTRIBUTES=service.name=oteldb
       - PPROF_ADDR=:9010
+      - GOMAXPROCS=6
+      - GOMEMLIMIT=3GiB
     ports:
-      - "127.0.0.1:9010:9010"   # pprof http://localhost:9010/debug/pprof/
+      - "127.0.0.1:9010:9010" # pprof http://localhost:9010/debug/pprof/
     depends_on:
       - clickhouse
 
   grafana:
-    image: "grafana/grafana:10.0.0"
+    image: "ghcr.io/go-faster/grafana:11.5.0-pre"
     profiles:
       - grafana
     environment:

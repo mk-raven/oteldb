@@ -8,6 +8,8 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 
 	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlabels"
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlpattern"
 )
 
 func TestPatternExtractor(t *testing.T) {
@@ -36,11 +38,11 @@ func TestPatternExtractor(t *testing.T) {
 		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			e, err := buildPatternExtractor(&logql.PatternLabelParser{
-				Pattern: tt.pattern,
+				Pattern: logqlpattern.MustParse(tt.pattern, logqlpattern.ExtractorFlags),
 			})
 			require.NoError(t, err)
 
-			set := newLabelSet()
+			set := logqlabels.NewLabelSet()
 			newLine, ok := e.Process(0, tt.input, set)
 			// Ensure that extractor does not change the line.
 			require.Equal(t, tt.input, newLine)

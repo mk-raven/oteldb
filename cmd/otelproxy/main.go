@@ -30,9 +30,17 @@ type service struct {
 	name      string
 	handler   http.Handler
 	findRoute httpmiddleware.RouteFinder
+	cleanup   func() error
 }
 
-func (s service) Run(ctx context.Context, lg *zap.Logger, m *app.Metrics) error {
+func (s service) Run(ctx context.Context, lg *zap.Logger, m *app.Telemetry) error {
+	if s.cleanup != nil {
+		defer func() {
+			if err := s.cleanup(); err != nil {
+				lg.Error("Cleanup failed", zap.Error(err))
+			}
+		}()
+	}
 	httpServer := &http.Server{
 		Addr:              s.addr,
 		Handler:           ServiceMiddleware(s, lg, m),
@@ -66,7 +74,7 @@ func (s service) Run(ctx context.Context, lg *zap.Logger, m *app.Metrics) error 
 }
 
 // ServiceMiddleware is a generic middleware for any service.
-func ServiceMiddleware(s service, lg *zap.Logger, m *app.Metrics) http.Handler {
+func ServiceMiddleware(s service, lg *zap.Logger, m *app.Telemetry) http.Handler {
 	return httpmiddleware.Wrap(s.handler,
 		httpmiddleware.InjectLogger(lg),
 		httpmiddleware.Instrument(s.name, s.findRoute, m),
@@ -90,7 +98,7 @@ func (s *services) addService(addr string, srv service) error {
 	return nil
 }
 
-func (s *services) Prometheus(m *app.Metrics) error {
+func (s *services) Prometheus(m *app.Telemetry) error {
 	const (
 		prefix      = "PROMETHEUS"
 		defaultPort = ":9090"
@@ -108,9 +116,26 @@ func (s *services) Prometheus(m *app.Metrics) error {
 	if err != nil {
 		return errors.Wrap(err, "create client")
 	}
-
+	var (
+		rec     *promproxy.Recorder
+		cleanup func() error
+	)
+	if fName := os.Getenv(prefix + "_RECORD"); fName != "" {
+		// #nosec G304 G302
+		f, err := os.OpenFile(fName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)
+		if err != nil {
+			return errors.Wrap(err, "create record file")
+		}
+		rec = promproxy.NewRecorder(f)
+		cleanup = func() error {
+			if err := f.Close(); err != nil {
+				return errors.Wrap(err, "close record file")
+			}
+			return nil
+		}
+	}
 	server, err := promapi.NewServer(
-		promproxy.NewServer(client),
+		promproxy.NewServer(client, rec),
 		promapi.WithTracerProvider(m.TracerProvider()),
 		promapi.WithMeterProvider(m.MeterProvider()),
 	)
@@ -127,10 +152,11 @@ func (s *services) Prometheus(m *app.Metrics) error {
 		name:      strings.ToLower(prefix),
 		handler:   server,
 		findRoute: httpmiddleware.MakeRouteFinder[promapi.Route](server),
+		cleanup:   cleanup,
 	})
 }
 
-func (s *services) Loki(m *app.Metrics) error {
+func (s *services) Loki(m *app.Telemetry) error {
 	const (
 		prefix      = "LOKI"
 		defaultPort = ":3100"
@@ -170,7 +196,7 @@ func (s *services) Loki(m *app.Metrics) error {
 	})
 }
 
-func (s *services) Pyroscope(m *app.Metrics) error {
+func (s *services) Pyroscope(m *app.Telemetry) error {
 	const (
 		prefix      = "PYROSCOPE"
 		defaultPort = ":4040"
@@ -210,7 +236,7 @@ func (s *services) Pyroscope(m *app.Metrics) error {
 	})
 }
 
-func (s *services) Tempo(m *app.Metrics) error {
+func (s *services) Tempo(m *app.Telemetry) error {
 	const (
 		prefix      = "TEMPO"
 		defaultPort = ":3200"
@@ -223,7 +249,7 @@ func (s *services) Tempo(m *app.Metrics) error {
 	client, err := tempoapi.NewClient(upstreamURL,
 		tempoapi.WithTracerProvider(m.TracerProvider()),
 		tempoapi.WithMeterProvider(m.MeterProvider()),
-		tempoapi.WithClient(s.httpClient(newTempoTransport, m)),
+		tempoapi.WithClient(s.httpClient(nil, m)),
 	)
 	if err != nil {
 		return errors.Wrap(err, "create client")
@@ -250,7 +276,7 @@ func (s *services) Tempo(m *app.Metrics) error {
 	})
 }
 
-func (s *services) httpClient(wrap TransportMiddleware, m *app.Metrics) *http.Client {
+func (s *services) httpClient(wrap TransportMiddleware, m *app.Telemetry) *http.Client {
 	transport := http.DefaultTransport
 	if wrap != nil {
 		transport = wrap(transport)
@@ -264,7 +290,7 @@ func (s *services) httpClient(wrap TransportMiddleware, m *app.Metrics) *http.Cl
 }
 
 func main() {
-	app.Run(func(ctx context.Context, lg *zap.Logger, m *app.Metrics) error {
+	app.Run(func(ctx context.Context, lg *zap.Logger, m *app.Telemetry) error {
 		s := services{}
 		if err := s.Prometheus(m); err != nil {
 			return errors.Wrapf(err, "setup Prometheus proxy")

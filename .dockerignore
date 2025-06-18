@@ -1,5 +1,10 @@
+**/.git
 /.k8s
 /.github
 /docs
+/dev
 *.md
 *.Dockerfile
+
+# remore write queries
+*.rwq

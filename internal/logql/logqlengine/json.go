@@ -7,12 +7,13 @@ import (
 
 	"github.com/go-faster/oteldb/internal/logql"
 	"github.com/go-faster/oteldb/internal/logql/logqlengine/jsonexpr"
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlabels"
 	"github.com/go-faster/oteldb/internal/otelstorage"
 )
 
 // JSONExtractor is a JSON label extractor.
 type JSONExtractor struct {
-	paths  map[logql.Label]jsonexpr.Path
+	paths  jsonexpr.SelectorTree
 	labels map[logql.Label]struct{}
 }
 
@@ -25,20 +26,21 @@ func buildJSONExtractor(stage *logql.JSONExpressionParser) (Processor, error) {
 	e := &JSONExtractor{}
 	switch {
 	case len(exprs) > 0:
-		e.paths = make(map[logql.Label]jsonexpr.Path, len(labels)+len(exprs))
+		paths := make(map[logql.Label]jsonexpr.Path, len(labels)+len(exprs))
 		for _, p := range exprs {
 			sel, err := jsonexpr.Parse(p.Expr)
 			if err != nil {
 				return nil, errors.Wrapf(err, "parse selector %q", p.Expr)
 			}
-			e.paths[p.Label] = sel
+			paths[p.Label] = sel
 		}
 		// Convert labels into selectors.
 		for _, label := range labels {
-			e.paths[label] = jsonexpr.Path{
+			paths[label] = jsonexpr.Path{
 				jsonexpr.KeySel(string(label)),
 			}
 		}
+		e.paths = jsonexpr.MakeSelectorTree(paths)
 		return e, nil
 	case len(labels) > 0:
 		e.labels = make(map[logql.Label]struct{}, len(labels))
@@ -52,10 +54,10 @@ func buildJSONExtractor(stage *logql.JSONExpressionParser) (Processor, error) {
 }
 
 // Process implements Processor.
-func (e *JSONExtractor) Process(_ otelstorage.Timestamp, line string, set LabelSet) (string, bool) {
+func (e *JSONExtractor) Process(_ otelstorage.Timestamp, line string, set logqlabels.LabelSet) (string, bool) {
 	var err error
 	switch {
-	case len(e.paths) != 0:
+	case !e.paths.IsEmpty():
 		err = extractExprs(e.paths, line, set)
 	case len(e.labels) != 0:
 		err = extractSome(e.labels, line, set)
@@ -68,7 +70,7 @@ func (e *JSONExtractor) Process(_ otelstorage.Timestamp, line string, set LabelS
 	return line, true
 }
 
-func extractExprs(paths map[logql.Label]jsonexpr.Path, line string, set LabelSet) error {
+func extractExprs(paths jsonexpr.SelectorTree, line string, set logqlabels.LabelSet) error {
 	// TODO(tdakkota): allocates buffer for each line.
 	d := decodeStr(line)
 	return jsonexpr.Extract(
@@ -80,7 +82,7 @@ func extractExprs(paths map[logql.Label]jsonexpr.Path, line string, set LabelSet
 	)
 }
 
-func extractSome(labels map[logql.Label]struct{}, line string, set LabelSet) error {
+func extractSome(labels map[logql.Label]struct{}, line string, set logqlabels.LabelSet) error {
 	d := decodeStr(line)
 	return d.ObjBytes(func(d *jx.Decoder, key []byte) error {
 		if _, ok := labels[logql.Label(key)]; !ok {
@@ -101,7 +103,7 @@ func extractSome(labels map[logql.Label]struct{}, line string, set LabelSet) err
 	})
 }
 
-func extractAll(line string, set LabelSet) error {
+func extractAll(line string, set logqlabels.LabelSet) error {
 	d := decodeStr(line)
 	return d.Obj(func(d *jx.Decoder, key string) error {
 		value, ok, err := parseValue(d)

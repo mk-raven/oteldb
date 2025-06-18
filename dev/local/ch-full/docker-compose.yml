@@ -6,47 +6,25 @@ volumes:
 
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:23.10
+    image: "ghcr.io/go-faster/clickhouse-server:23.12"
     ports:
       - "9000:9000"
       - "8123:8123"
     volumes:
       - ../clickhouse.xml:/etc/clickhouse-server/config.d/monitoring.xml
     healthcheck:
-      test: ['CMD', 'wget', '--spider', '-q', '127.0.0.1:8123/ping']
+      test: ["CMD", "wget", "--spider", "-q", "127.0.0.1:8123/ping"]
       interval: 1s
       timeout: 1s
       retries: 30
 
-  # Add https://github.com/metrico/qryn for compatibility testing.
-  qryn:
-    image: qxip/qryn:latest
-    ports:
-      - "3101:3100"
-    restart: on-failure
-    environment:
-      - CLICKHOUSE_SERVER=clickhouse
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
-      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-      - OTEL_EXPORTER_OTLP_INSECURE=true
-      - OTEL_RESOURCE_ATTRIBUTES=service.name=qryn
-    depends_on:
-      - clickhouse
-
-  qryn-collector:
-    image: ghcr.io/metrico/qryn-otel-collector:latest
-    volumes:
-      - ./qryncol.yml:/etc/otel/config.yaml
-    restart: on-failure
-    depends_on:
-      - clickhouse
-
   # Exports traces from clickhouse internal table to otel.
   chotel:
-    restart: always
+    image: ghcr.io/go-faster/oteldb/chotel
     build:
       context: ../../../
       dockerfile: chotel.Dockerfile
+    restart: always
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
@@ -56,6 +34,7 @@ services:
       - clickhouse
 
   oteldb:
+    image: ghcr.io/go-faster/oteldb
     build:
       context: ../../../
       dockerfile: Dockerfile
@@ -70,19 +49,9 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
       - OTEL_RESOURCE_ATTRIBUTES=service.name=go-faster.oteldb
     ports:
-      - "9090:9090"   # prometheus API
+      - "9090:9090" # prometheus API
     depends_on:
       - clickhouse
-
-  otelfaker:
-    build:
-      context: ../../../
-      dockerfile: otelfaker.Dockerfile
-    environment:
-      - OTEL_TARGET=otelcol:4317
-    depends_on:
-      - oteldb
-      - otelcol
 
   # Generates traces.
   k6-tracing:
@@ -96,10 +65,10 @@ services:
   # to scrape node-exporter
   # also can remote-write to otelcol
   prometheus:
-    image: prom/prometheus
+    image: "ghcr.io/go-faster/prom/prometheus:v3.1.0"
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--web.enable-remote-write-receiver'
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-remote-write-receiver"
     ports:
       - "9091:9090"
     restart: unless-stopped
@@ -109,11 +78,11 @@ services:
 
   # For compliance testing.
   demo-1:
-    image: julius/prometheus-demo-service:latest
+    image: "ghcr.io/go-faster/prometheus-demo-service"
   demo-2:
-    image: julius/prometheus-demo-service:latest
+    image: "ghcr.io/go-faster/prometheus-demo-service"
   demo-3:
-    image: julius/prometheus-demo-service:latest
+    image: "ghcr.io/go-faster/prometheus-demo-service"
 
   # for LogQL
   loki:
@@ -135,11 +104,11 @@ services:
       - OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc
       - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otelcol:4317
     command:
-      - '--config'
-      - '/etc/otelcol-contrib/config.yaml'
+      - "--config"
+      - "/etc/otelcol-contrib/config.yaml"
       #  https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/observability.md#how-we-expose-telemetry
-      - '--feature-gates=telemetry.useOtelForInternalMetrics'
-      - '--feature-gates=telemetry.useOtelWithSDKConfigurationForInternalTelemetry'
+      - "--feature-gates=telemetry.useOtelForInternalMetrics"
+      - "--feature-gates=telemetry.useOtelWithSDKConfigurationForInternalTelemetry"
 
   # to produce some metrics
   node-exporter:
@@ -150,26 +119,26 @@ services:
       - /sys:/host/sys:ro
       - /:/rootfs:ro
     command:
-      - '--path.procfs=/host/proc'
-      - '--path.rootfs=/rootfs'
-      - '--path.sysfs=/host/sys'
-      - '--collector.processes'
-      - '--web.max-requests=40'
-      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      - "--path.procfs=/host/proc"
+      - "--path.rootfs=/rootfs"
+      - "--path.sysfs=/host/sys"
+      - "--collector.processes"
+      - "--web.max-requests=40"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
 
   # for compatibility testing
   jaeger:
     image: jaegertracing/all-in-one:latest
 
   tempo:
-    image: grafana/tempo:latest
-    command: [ "-config.file=/etc/tempo.yml" ]
+    image: "ghcr.io/go-faster/tempo"
+    command: ["-config.file=/etc/tempo.yml"]
     volumes:
       - ./tempo.yml:/etc/tempo.yml
       - tempo:/tmp/tempo
 
   grafana:
-    image: "grafana/grafana:10.0.0"
+    image: "ghcr.io/go-faster/grafana:11.5.0-pre"
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
@@ -182,8 +151,8 @@ services:
     ports:
       - "3000:3000"
     volumes:
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
       - ../grafana/grafana.ini:/etc/grafana/grafana.ini
-      - ../grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
       - ../grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/default.yml
       - ../grafana/dashboards:/etc/grafana/dashboards:ro
     depends_on:
@@ -195,7 +164,7 @@ services:
   flog:
     image: mingrammer/flog:0.4.3
     # Output fake log in JSON format
-    command: [ "--format=json", "--loop", "--delay=100ms"]
+    command: ["--format=json", "--loop", "--delay=100ms"]
     depends_on: [otelcol]
     logging:
       driver: fluentd

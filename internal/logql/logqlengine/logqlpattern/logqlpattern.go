@@ -2,7 +2,6 @@
 package logqlpattern
 
 import (
-	"io"
 	"strings"
 	"text/scanner"
 	"unicode/utf8"
@@ -26,49 +25,85 @@ type Part struct {
 	Value string
 }
 
+func (p Part) isNamedCapture() bool {
+	return p.Type == Capture && p.Value != "_"
+}
+
 // Pattern is a parsed pattern.
 type Pattern struct {
 	Parts []Part
 }
 
-// Parse parses pattern.
-func Parse(input string) (p Pattern, _ error) {
+// ParseFlags defines options for [Parse].
+type ParseFlags uint8
+
+// Has whether if flag is set.
+func (f ParseFlags) Has(flag ParseFlags) bool {
+	return f&flag != 0
+}
+
+const (
+	RequireCapture ParseFlags = 1 << iota
+	DisallowNamed
+
+	ExtractorFlags  = RequireCapture
+	LineFilterFlags = DisallowNamed
+)
+
+// MustParse is like [Parse] but panics if the expression cannot be parsed.
+func MustParse(input string, flags ParseFlags) Pattern {
+	p, err := Parse(input, flags)
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
+// Parse parses LogQL pattern.
+func Parse(input string, flags ParseFlags) (p Pattern, _ error) {
+	if !utf8.ValidString(input) {
+		return p, errors.New("pattern is invalid UTF-8")
+	}
 	r := &reader{
 		input: input,
 	}
 
 	var captures int
-scanLoop:
 	for {
-		part, err := r.Scan()
-		switch {
-		case err == nil:
-			if part.Type == Capture {
-				captures++
-			}
-			p.Parts = append(p.Parts, part)
-		case err == io.EOF:
-			break scanLoop
-		default:
-			return p, err
+		part, ok := r.Scan()
+		if !ok {
+			break
 		}
-	}
-	if len(p.Parts) == 0 {
-		return p, errors.New("pattern is empty")
-	}
-	if captures < 1 {
-		return p, errors.New("at least one capture is expected")
+
+		if part.isNamedCapture() {
+			captures++
+		}
+		p.Parts = append(p.Parts, part)
 	}
 
-	dedup := make(map[string]struct{}, captures)
-	for _, part := range p.Parts {
-		if part.Type != Capture || part.Value == "_" {
-			continue
+	if flags.Has(RequireCapture) {
+		if captures < 1 {
+			return p, errors.New("at least one capture is expected")
 		}
-		if _, ok := dedup[part.Value]; ok {
-			return p, errors.Errorf("duplicate capture %q", part.Value)
+	}
+
+	if flags.Has(DisallowNamed) {
+		for _, part := range p.Parts {
+			if part.isNamedCapture() {
+				return p, errors.Errorf("unexpected named pattern %q", part.Value)
+			}
 		}
-		dedup[part.Value] = struct{}{}
+	} else {
+		dedup := make(map[string]struct{}, captures)
+		for _, part := range p.Parts {
+			if !part.isNamedCapture() {
+				continue
+			}
+			if _, ok := dedup[part.Value]; ok {
+				return p, errors.Errorf("duplicate capture %q", part.Value)
+			}
+			dedup[part.Value] = struct{}{}
+		}
 	}
 
 	for i, part := range p.Parts {
@@ -93,11 +128,11 @@ type reader struct {
 	pos   int
 }
 
-func (r *reader) Scan() (Part, error) {
+func (r *reader) Scan() (Part, bool) {
 	ch := r.Peek()
 	switch ch {
 	case scanner.EOF:
-		return Part{}, io.EOF
+		return Part{}, false
 	case '<':
 		// Consume '<'.
 		r.Read()
@@ -110,7 +145,7 @@ func (r *reader) Scan() (Part, error) {
 // scanCapture scans Capture.
 //
 // precondition: caller must read '<'.
-func (r *reader) scanCapture() (Part, error) {
+func (r *reader) scanCapture() (Part, bool) {
 	// Label should start with `[_A-Za-z]`.
 	// If it do not, consider part as literal.
 	if ch := r.Peek(); !lexerql.IsIdentStartRune(ch) {
@@ -126,7 +161,7 @@ func (r *reader) scanCapture() (Part, error) {
 			return Part{
 				Type:  Literal,
 				Value: label.String(),
-			}, nil
+			}, true
 		case '>':
 			// Consume '>'.
 			r.Read()
@@ -134,7 +169,7 @@ func (r *reader) scanCapture() (Part, error) {
 				Type: Capture,
 				// Trim leading '<'.
 				Value: strings.TrimPrefix(label.String(), "<"),
-			}, nil
+			}, true
 		default:
 			if lexerql.IsIdentRune(ch) {
 				label.WriteRune(r.Read())
@@ -145,7 +180,7 @@ func (r *reader) scanCapture() (Part, error) {
 	}
 }
 
-func (r *reader) scanLiteral(prefix string) (Part, error) {
+func (r *reader) scanLiteral(prefix string) (Part, bool) {
 	var literal strings.Builder
 	literal.WriteString(prefix)
 	for {
@@ -154,7 +189,7 @@ func (r *reader) scanLiteral(prefix string) (Part, error) {
 			return Part{
 				Type:  Literal,
 				Value: literal.String(),
-			}, nil
+			}, true
 		case '<':
 			// Consume '<'.
 			r.Read()
@@ -167,7 +202,7 @@ func (r *reader) scanLiteral(prefix string) (Part, error) {
 			return Part{
 				Type:  Literal,
 				Value: literal.String(),
-			}, nil
+			}, true
 		default:
 			literal.WriteRune(r.Read())
 		}

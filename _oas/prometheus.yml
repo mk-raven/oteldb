@@ -39,7 +39,7 @@ paths:
         200:
           $ref: "#/components/responses/QueryResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
     post:
       operationId: postQuery
       description: Query Prometheus
@@ -53,7 +53,7 @@ paths:
         200:
           $ref: "#/components/responses/QueryResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
   /api/v1/query_range:
     description: Evaluates an expression query over a range of time.
     get:
@@ -99,7 +99,7 @@ paths:
         200:
           $ref: "#/components/responses/QueryResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
     post:
       operationId: postQueryRange
       description: Query Prometheus
@@ -113,7 +113,7 @@ paths:
         200:
           $ref: "#/components/responses/QueryResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
   /api/v1/query_exemplars:
     description: Returns a list of exemplars for a valid PromQL query for a specific time range
     get:
@@ -142,7 +142,7 @@ paths:
         200:
           $ref: "#/components/responses/QueryExemplarsResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
     post:
       operationId: postQueryExemplars
       description: Query Prometheus
@@ -156,7 +156,7 @@ paths:
         200:
           $ref: "#/components/responses/QueryExemplarsResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
   /api/v1/series:
     description: Returns the list of time series that match a certain label set.
     get:
@@ -182,11 +182,16 @@ paths:
             items:
               type: string
             minItems: 1
+        - name: limit
+          description: Maximum number of returned series. Optional. 0 means disabled.
+          in: query
+          schema:
+            type: integer
       responses:
         200:
           $ref: "#/components/responses/SeriesResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
     post:
       operationId: postSeries
       description: Query Prometheus
@@ -200,7 +205,7 @@ paths:
         200:
           $ref: "#/components/responses/SeriesResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
   /api/v1/labels:
     description: Returns a list of label names.
     get:
@@ -223,11 +228,16 @@ paths:
             type: array
             items:
               type: string
+        - name: limit
+          description: Maximum number of returned series. Optional. 0 means disabled.
+          in: query
+          schema:
+            type: integer
       responses:
         200:
           $ref: "#/components/responses/LabelsResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
     post:
       operationId: postLabels
       requestBody:
@@ -240,7 +250,7 @@ paths:
         200:
           $ref: "#/components/responses/LabelsResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
   /api/v1/label/{label}/values:
     description: Returns a list of label values for a provided label name.
     get:
@@ -269,11 +279,16 @@ paths:
             type: array
             items:
               type: string
+        - name: limit
+          description: Maximum number of returned series. Optional. 0 means disabled.
+          in: query
+          schema:
+            type: integer
       responses:
         200:
           $ref: "#/components/responses/LabelValuesResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
   /api/v1/rules:
     description: Returns a list of alerting and recording rules that are currently loaded.
     get:
@@ -323,7 +338,7 @@ paths:
         200:
           $ref: "#/components/responses/RulesResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
   /api/v1/metadata:
     description: Returns metadata about metrics currently scraped from targets.
     get:
@@ -351,7 +366,7 @@ paths:
         200:
           $ref: "#/components/responses/MetadataResponse"
         default:
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Fail"
 components:
   responses:
     QueryResponse:
@@ -359,149 +374,86 @@ components:
       content:
         "application/json":
           schema:
-            type: object
-            required: [status, data]
-            properties:
-              status:
-                type: string
-                default: "success"
-                description: Always 'success'
-              warnings:
-                description: >-
-                  Only if there were warnings while executing the request.
-                  There will still be data in the data field.
-                type: array
-                items:
-                  type: string
-              data:
-                $ref: "#/components/schemas/Data"
+            allOf:
+              - $ref: "#/components/schemas/ResponseMixin"
+              - type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Data"
     QueryExemplarsResponse:
       description: Query response
       content:
         "application/json":
           schema:
-            type: object
-            required: [status, data]
-            properties:
-              status:
-                type: string
-                default: "success"
-                description: Always 'success'
-              warnings:
-                description: >-
-                  Only if there were warnings while executing the request.
-                  There will still be data in the data field.
-                type: array
-                items:
-                  type: string
-              data:
-                $ref: "#/components/schemas/Exemplars"
+            allOf:
+              - $ref: "#/components/schemas/ResponseMixin"
+              - type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Exemplars"
     SeriesResponse:
       description: Series list
       content:
         "application/json":
           schema:
-            type: object
-            required: [status, data]
-            properties:
-              status:
-                type: string
-                default: "success"
-                description: Always 'success'
-              warnings:
-                description: >-
-                  Only if there were warnings while executing the request.
-                  There will still be data in the data field.
-                type: array
-                items:
-                  type: string
-              data:
-                $ref: "#/components/schemas/Series"
+            allOf:
+              - $ref: "#/components/schemas/ResponseMixin"
+              - type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Series"
     LabelsResponse:
       description: Labels list
       content:
         "application/json":
           schema:
-            type: object
-            required: [status, data]
-            properties:
-              status:
-                type: string
-                default: "success"
-                description: Always 'success'
-              warnings:
-                description: >-
-                  Only if there were warnings while executing the request.
-                  There will still be data in the data field.
-                type: array
-                items:
-                  type: string
-              data:
-                $ref: "#/components/schemas/Labels"
+            allOf:
+              - $ref: "#/components/schemas/ResponseMixin"
+              - type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Labels"
     LabelValuesResponse:
       description: Label values list
       content:
         "application/json":
           schema:
-            type: object
-            required: [status, data]
-            properties:
-              status:
-                type: string
-                default: "success"
-                description: Always 'success'
-              warnings:
-                description: >-
-                  Only if there were warnings while executing the request.
-                  There will still be data in the data field.
-                type: array
-                items:
-                  type: string
-              data:
-                $ref: "#/components/schemas/LabelValues"
+            allOf:
+              - $ref: "#/components/schemas/ResponseMixin"
+              - type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/LabelValues"
     RulesResponse:
       description: Rule list
       content:
         "application/json":
           schema:
-            type: object
-            required: [status, data]
-            properties:
-              status:
-                type: string
-                default: "success"
-                description: Always 'success'
-              warnings:
-                description: >-
-                  Only if there were warnings while executing the request.
-                  There will still be data in the data field.
-                type: array
-                items:
-                  type: string
-              data:
-                $ref: "#/components/schemas/Rules"
+            allOf:
+              - $ref: "#/components/schemas/ResponseMixin"
+              - type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Rules"
     MetadataResponse:
       description: Label list
       content:
         "application/json":
           schema:
-            type: object
-            required: [status, data]
-            properties:
-              status:
-                type: string
-                default: "success"
-                description: Always 'success'
-              warnings:
-                description: >-
-                  Only if there were warnings while executing the request.
-                  There will still be data in the data field.
-                type: array
-                items:
-                  type: string
-              data:
-                $ref: "#/components/schemas/Metadata"
-    Error:
+            allOf:
+              - $ref: "#/components/schemas/ResponseMixin"
+              - type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Metadata"
+    Fail:
       description: Error while processing request
       content:
         "application/json":
@@ -571,6 +523,28 @@ components:
           $ref: "#/components/schemas/PrometheusTimestamp"
         end:
           $ref: "#/components/schemas/PrometheusTimestamp"
+
+    ResponseMixin:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          default: "success"
+          description: Always 'success'
+        warnings:
+          description: >-
+            Only if there were warnings while executing the request.
+            There will still be data in the data field.
+          type: array
+          items:
+            type: string
+        infos:
+          description: >-
+            Only set if there were info-level annnotations while executing the request.
+          type: array
+          items:
+            type: string
 
     Scalar:
       type: object

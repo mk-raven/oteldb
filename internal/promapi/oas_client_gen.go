@@ -12,7 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
-	semconv "go.opentelemetry.io/otel/semconv/v1.19.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ogen-go/ogen/conv"
@@ -20,6 +20,11 @@ import (
 	"github.com/ogen-go/ogen/otelogen"
 	"github.com/ogen-go/ogen/uri"
 )
+
+func trimTrailingSlashes(u *url.URL) {
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = strings.TrimRight(u.RawPath, "/")
+}
 
 // Invoker invokes operations described by OpenAPI v3 specification.
 type Invoker interface {
@@ -107,11 +112,6 @@ var _ Handler = struct {
 	*Client
 }{}
 
-func trimTrailingSlashes(u *url.URL) {
-	u.Path = strings.TrimRight(u.Path, "/")
-	u.RawPath = strings.TrimRight(u.RawPath, "/")
-}
-
 // NewClient initializes new Client defined by OAS.
 func NewClient(serverURL string, opts ...ClientOption) (*Client, error) {
 	u, err := url.Parse(serverURL)
@@ -156,7 +156,7 @@ func (c *Client) GetLabelValues(ctx context.Context, params GetLabelValuesParams
 func (c *Client) sendGetLabelValues(ctx context.Context, params GetLabelValuesParams) (res *LabelValuesResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("getLabelValues"),
-		semconv.HTTPMethodKey.String("GET"),
+		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/api/v1/label/{label}/values"),
 	}
 
@@ -165,14 +165,14 @@ func (c *Client) sendGetLabelValues(ctx context.Context, params GetLabelValuesPa
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "GetLabelValues",
+	ctx, span := c.cfg.Tracer.Start(ctx, GetLabelValuesOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -263,16 +263,36 @@ func (c *Client) sendGetLabelValues(ctx context.Context, params GetLabelValuesPa
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			return e.EncodeArray(func(e uri.Encoder) error {
-				for i, item := range params.Match {
-					if err := func() error {
-						return e.EncodeValue(conv.StringToString(item))
-					}(); err != nil {
-						return errors.Wrapf(err, "[%d]", i)
+			if params.Match != nil {
+				return e.EncodeArray(func(e uri.Encoder) error {
+					for i, item := range params.Match {
+						if err := func() error {
+							return e.EncodeValue(conv.StringToString(item))
+						}(); err != nil {
+							return errors.Wrapf(err, "[%d]", i)
+						}
 					}
-				}
-				return nil
-			})
+					return nil
+				})
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "limit" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Limit.Get(); ok {
+				return e.EncodeValue(conv.IntToString(val))
+			}
+			return nil
 		}); err != nil {
 			return res, errors.Wrap(err, "encode query")
 		}
@@ -312,7 +332,7 @@ func (c *Client) GetLabels(ctx context.Context, params GetLabelsParams) (*Labels
 func (c *Client) sendGetLabels(ctx context.Context, params GetLabelsParams) (res *LabelsResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("getLabels"),
-		semconv.HTTPMethodKey.String("GET"),
+		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/api/v1/labels"),
 	}
 
@@ -321,14 +341,14 @@ func (c *Client) sendGetLabels(ctx context.Context, params GetLabelsParams) (res
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "GetLabels",
+	ctx, span := c.cfg.Tracer.Start(ctx, GetLabelsOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -400,16 +420,36 @@ func (c *Client) sendGetLabels(ctx context.Context, params GetLabelsParams) (res
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			return e.EncodeArray(func(e uri.Encoder) error {
-				for i, item := range params.Match {
-					if err := func() error {
-						return e.EncodeValue(conv.StringToString(item))
-					}(); err != nil {
-						return errors.Wrapf(err, "[%d]", i)
+			if params.Match != nil {
+				return e.EncodeArray(func(e uri.Encoder) error {
+					for i, item := range params.Match {
+						if err := func() error {
+							return e.EncodeValue(conv.StringToString(item))
+						}(); err != nil {
+							return errors.Wrapf(err, "[%d]", i)
+						}
 					}
-				}
-				return nil
-			})
+					return nil
+				})
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "limit" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Limit.Get(); ok {
+				return e.EncodeValue(conv.IntToString(val))
+			}
+			return nil
 		}); err != nil {
 			return res, errors.Wrap(err, "encode query")
 		}
@@ -449,7 +489,7 @@ func (c *Client) GetMetadata(ctx context.Context, params GetMetadataParams) (*Me
 func (c *Client) sendGetMetadata(ctx context.Context, params GetMetadataParams) (res *MetadataResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("getMetadata"),
-		semconv.HTTPMethodKey.String("GET"),
+		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/api/v1/metadata"),
 	}
 
@@ -458,14 +498,14 @@ func (c *Client) sendGetMetadata(ctx context.Context, params GetMetadataParams) 
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "GetMetadata",
+	ctx, span := c.cfg.Tracer.Start(ctx, GetMetadataOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -576,7 +616,7 @@ func (c *Client) GetQuery(ctx context.Context, params GetQueryParams) (*QueryRes
 func (c *Client) sendGetQuery(ctx context.Context, params GetQueryParams) (res *QueryResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("getQuery"),
-		semconv.HTTPMethodKey.String("GET"),
+		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/api/v1/query"),
 	}
 
@@ -585,14 +625,14 @@ func (c *Client) sendGetQuery(ctx context.Context, params GetQueryParams) (res *
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "GetQuery",
+	ctx, span := c.cfg.Tracer.Start(ctx, GetQueryOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -720,7 +760,7 @@ func (c *Client) GetQueryExemplars(ctx context.Context, params GetQueryExemplars
 func (c *Client) sendGetQueryExemplars(ctx context.Context, params GetQueryExemplarsParams) (res *QueryExemplarsResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("getQueryExemplars"),
-		semconv.HTTPMethodKey.String("GET"),
+		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/api/v1/query_exemplars"),
 	}
 
@@ -729,14 +769,14 @@ func (c *Client) sendGetQueryExemplars(ctx context.Context, params GetQueryExemp
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "GetQueryExemplars",
+	ctx, span := c.cfg.Tracer.Start(ctx, GetQueryExemplarsOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -844,7 +884,7 @@ func (c *Client) GetQueryRange(ctx context.Context, params GetQueryRangeParams) 
 func (c *Client) sendGetQueryRange(ctx context.Context, params GetQueryRangeParams) (res *QueryResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("getQueryRange"),
-		semconv.HTTPMethodKey.String("GET"),
+		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/api/v1/query_range"),
 	}
 
@@ -853,14 +893,14 @@ func (c *Client) sendGetQueryRange(ctx context.Context, params GetQueryRangePara
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "GetQueryRange",
+	ctx, span := c.cfg.Tracer.Start(ctx, GetQueryRangeOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -1014,7 +1054,7 @@ func (c *Client) GetRules(ctx context.Context, params GetRulesParams) (*RulesRes
 func (c *Client) sendGetRules(ctx context.Context, params GetRulesParams) (res *RulesResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("getRules"),
-		semconv.HTTPMethodKey.String("GET"),
+		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/api/v1/rules"),
 	}
 
@@ -1023,14 +1063,14 @@ func (c *Client) sendGetRules(ctx context.Context, params GetRulesParams) (res *
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "GetRules",
+	ctx, span := c.cfg.Tracer.Start(ctx, GetRulesOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -1079,16 +1119,19 @@ func (c *Client) sendGetRules(ctx context.Context, params GetRulesParams) (res *
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			return e.EncodeArray(func(e uri.Encoder) error {
-				for i, item := range params.RuleName {
-					if err := func() error {
-						return e.EncodeValue(conv.StringToString(item))
-					}(); err != nil {
-						return errors.Wrapf(err, "[%d]", i)
+			if params.RuleName != nil {
+				return e.EncodeArray(func(e uri.Encoder) error {
+					for i, item := range params.RuleName {
+						if err := func() error {
+							return e.EncodeValue(conv.StringToString(item))
+						}(); err != nil {
+							return errors.Wrapf(err, "[%d]", i)
+						}
 					}
-				}
-				return nil
-			})
+					return nil
+				})
+			}
+			return nil
 		}); err != nil {
 			return res, errors.Wrap(err, "encode query")
 		}
@@ -1102,16 +1145,19 @@ func (c *Client) sendGetRules(ctx context.Context, params GetRulesParams) (res *
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			return e.EncodeArray(func(e uri.Encoder) error {
-				for i, item := range params.RuleGroup {
-					if err := func() error {
-						return e.EncodeValue(conv.StringToString(item))
-					}(); err != nil {
-						return errors.Wrapf(err, "[%d]", i)
+			if params.RuleGroup != nil {
+				return e.EncodeArray(func(e uri.Encoder) error {
+					for i, item := range params.RuleGroup {
+						if err := func() error {
+							return e.EncodeValue(conv.StringToString(item))
+						}(); err != nil {
+							return errors.Wrapf(err, "[%d]", i)
+						}
 					}
-				}
-				return nil
-			})
+					return nil
+				})
+			}
+			return nil
 		}); err != nil {
 			return res, errors.Wrap(err, "encode query")
 		}
@@ -1125,16 +1171,19 @@ func (c *Client) sendGetRules(ctx context.Context, params GetRulesParams) (res *
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			return e.EncodeArray(func(e uri.Encoder) error {
-				for i, item := range params.File {
-					if err := func() error {
-						return e.EncodeValue(conv.StringToString(item))
-					}(); err != nil {
-						return errors.Wrapf(err, "[%d]", i)
+			if params.File != nil {
+				return e.EncodeArray(func(e uri.Encoder) error {
+					for i, item := range params.File {
+						if err := func() error {
+							return e.EncodeValue(conv.StringToString(item))
+						}(); err != nil {
+							return errors.Wrapf(err, "[%d]", i)
+						}
 					}
-				}
-				return nil
-			})
+					return nil
+				})
+			}
+			return nil
 		}); err != nil {
 			return res, errors.Wrap(err, "encode query")
 		}
@@ -1176,7 +1225,7 @@ func (c *Client) GetSeries(ctx context.Context, params GetSeriesParams) (*Series
 func (c *Client) sendGetSeries(ctx context.Context, params GetSeriesParams) (res *SeriesResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("getSeries"),
-		semconv.HTTPMethodKey.String("GET"),
+		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/api/v1/series"),
 	}
 
@@ -1185,14 +1234,14 @@ func (c *Client) sendGetSeries(ctx context.Context, params GetSeriesParams) (res
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "GetSeries",
+	ctx, span := c.cfg.Tracer.Start(ctx, GetSeriesOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -1278,6 +1327,23 @@ func (c *Client) sendGetSeries(ctx context.Context, params GetSeriesParams) (res
 			return res, errors.Wrap(err, "encode query")
 		}
 	}
+	{
+		// Encode "limit" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Limit.Get(); ok {
+				return e.EncodeValue(conv.IntToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
 	u.RawQuery = q.Values().Encode()
 
 	stage = "EncodeRequest"
@@ -1313,7 +1379,7 @@ func (c *Client) PostLabels(ctx context.Context, request *LabelsForm) (*LabelsRe
 func (c *Client) sendPostLabels(ctx context.Context, request *LabelsForm) (res *LabelsResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("postLabels"),
-		semconv.HTTPMethodKey.String("POST"),
+		semconv.HTTPRequestMethodKey.String("POST"),
 		semconv.HTTPRouteKey.String("/api/v1/labels"),
 	}
 
@@ -1322,14 +1388,14 @@ func (c *Client) sendPostLabels(ctx context.Context, request *LabelsForm) (res *
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "PostLabels",
+	ctx, span := c.cfg.Tracer.Start(ctx, PostLabelsOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -1388,7 +1454,7 @@ func (c *Client) PostQuery(ctx context.Context, request *QueryForm) (*QueryRespo
 func (c *Client) sendPostQuery(ctx context.Context, request *QueryForm) (res *QueryResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("postQuery"),
-		semconv.HTTPMethodKey.String("POST"),
+		semconv.HTTPRequestMethodKey.String("POST"),
 		semconv.HTTPRouteKey.String("/api/v1/query"),
 	}
 
@@ -1397,14 +1463,14 @@ func (c *Client) sendPostQuery(ctx context.Context, request *QueryForm) (res *Qu
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "PostQuery",
+	ctx, span := c.cfg.Tracer.Start(ctx, PostQueryOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -1463,7 +1529,7 @@ func (c *Client) PostQueryExemplars(ctx context.Context, request *ExemplarsForm)
 func (c *Client) sendPostQueryExemplars(ctx context.Context, request *ExemplarsForm) (res *QueryExemplarsResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("postQueryExemplars"),
-		semconv.HTTPMethodKey.String("POST"),
+		semconv.HTTPRequestMethodKey.String("POST"),
 		semconv.HTTPRouteKey.String("/api/v1/query_exemplars"),
 	}
 
@@ -1472,14 +1538,14 @@ func (c *Client) sendPostQueryExemplars(ctx context.Context, request *ExemplarsF
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "PostQueryExemplars",
+	ctx, span := c.cfg.Tracer.Start(ctx, PostQueryExemplarsOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -1538,7 +1604,7 @@ func (c *Client) PostQueryRange(ctx context.Context, request *QueryRangeForm) (*
 func (c *Client) sendPostQueryRange(ctx context.Context, request *QueryRangeForm) (res *QueryResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("postQueryRange"),
-		semconv.HTTPMethodKey.String("POST"),
+		semconv.HTTPRequestMethodKey.String("POST"),
 		semconv.HTTPRouteKey.String("/api/v1/query_range"),
 	}
 
@@ -1547,14 +1613,14 @@ func (c *Client) sendPostQueryRange(ctx context.Context, request *QueryRangeForm
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "PostQueryRange",
+	ctx, span := c.cfg.Tracer.Start(ctx, PostQueryRangeOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)
@@ -1613,7 +1679,7 @@ func (c *Client) PostSeries(ctx context.Context, request *SeriesForm) (*SeriesRe
 func (c *Client) sendPostSeries(ctx context.Context, request *SeriesForm) (res *SeriesResponse, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("postSeries"),
-		semconv.HTTPMethodKey.String("POST"),
+		semconv.HTTPRequestMethodKey.String("POST"),
 		semconv.HTTPRouteKey.String("/api/v1/series"),
 	}
 
@@ -1622,14 +1688,14 @@ func (c *Client) sendPostSeries(ctx context.Context, request *SeriesForm) (res *
 	defer func() {
 		// Use floating point division here for higher precision (instead of Millisecond method).
 		elapsedDuration := time.Since(startTime)
-		c.duration.Record(ctx, float64(float64(elapsedDuration)/float64(time.Millisecond)), metric.WithAttributes(otelAttrs...))
+		c.duration.Record(ctx, float64(elapsedDuration)/float64(time.Millisecond), metric.WithAttributes(otelAttrs...))
 	}()
 
 	// Increment request counter.
 	c.requests.Add(ctx, 1, metric.WithAttributes(otelAttrs...))
 
 	// Start a span for this request.
-	ctx, span := c.cfg.Tracer.Start(ctx, "PostSeries",
+	ctx, span := c.cfg.Tracer.Start(ctx, PostSeriesOperation,
 		trace.WithAttributes(otelAttrs...),
 		clientSpanKind,
 	)

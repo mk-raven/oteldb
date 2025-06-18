@@ -75,6 +75,8 @@ const (
 	NotRe
 	PipeExact
 	PipeMatch
+	PipePattern
+	NotPipePattern
 	Pipe
 	Unwrap
 	OpenParen
@@ -156,6 +158,9 @@ const (
 	DurationSecondsConv
 
 	ParserFlag
+
+	// Extension: for query debugging purposes.
+	Explain
 )
 
 var tokens = map[string]TokenType{
@@ -169,6 +174,8 @@ var tokens = map[string]TokenType{
 	"!~":          NotRe,
 	"|=":          PipeExact,
 	"|~":          PipeMatch,
+	"|>":          PipePattern,
+	"!>":          NotPipePattern,
 	"|":           Pipe,
 	"unwrap":      Unwrap,
 	"(":           OpenParen,
@@ -247,4 +254,6 @@ var tokens = map[string]TokenType{
 	"bytes":            BytesConv,
 	"duration":         DurationConv,
 	"duration_seconds": DurationSecondsConv,
+
+	"@explain": Explain,
 }

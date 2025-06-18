@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlpattern"
 )
 
 func ptrTo[T any](v T) *T {
@@ -128,7 +130,33 @@ var tests = []TestCase{
 		"{} |= `foo`",
 		&LogExpr{
 			Pipeline: []PipelineStage{
-				&LineFilter{Op: OpEq, Value: "foo"},
+				&LineFilter{Op: OpEq, By: LineFilterValue{Value: "foo"}},
+			},
+		},
+		false,
+	},
+	{
+		`{} |> "<_>foo" !> "<_>bar"`,
+		&LogExpr{
+			Pipeline: []PipelineStage{
+				&LineFilter{Op: OpPattern, By: LineFilterValue{Value: "<_>foo"}},
+				&LineFilter{Op: OpNotPattern, By: LineFilterValue{Value: "<_>bar"}},
+			},
+		},
+		false,
+	},
+	{
+		`{} |= "foo" or "bar" or ip("baz")`,
+		&LogExpr{
+			Pipeline: []PipelineStage{
+				&LineFilter{
+					Op: OpEq,
+					By: LineFilterValue{Value: "foo"},
+					Or: []LineFilterValue{
+						{Value: "bar"},
+						{Value: "baz", IP: true},
+					},
+				},
 			},
 		},
 		false,
@@ -148,11 +176,11 @@ var tests = []TestCase{
 				},
 			},
 			Pipeline: []PipelineStage{
-				&LineFilter{Op: OpEq, Value: "bad"},
-				&LineFilter{Op: OpRe, Value: "error", Re: regexp.MustCompile(`error`)},
-				&LineFilter{Op: OpNotEq, Value: "good"},
-				&LineFilter{Op: OpNotRe, Value: "exception", Re: regexp.MustCompile(`exception`)},
-				&LineFilter{Op: OpEq, Value: "127.0.0.1", IP: true},
+				&LineFilter{Op: OpEq, By: LineFilterValue{Value: "bad"}},
+				&LineFilter{Op: OpRe, By: LineFilterValue{Value: "error", Re: regexp.MustCompile(`error`)}},
+				&LineFilter{Op: OpNotEq, By: LineFilterValue{Value: "good"}},
+				&LineFilter{Op: OpNotRe, By: LineFilterValue{Value: "exception", Re: regexp.MustCompile(`exception`)}},
+				&LineFilter{Op: OpEq, By: LineFilterValue{Value: "127.0.0.1", IP: true}},
 			},
 		},
 		false,
@@ -168,7 +196,7 @@ var tests = []TestCase{
 					},
 				},
 				Pipeline: []PipelineStage{
-					&LineFilter{Op: OpEq, Value: "bad"},
+					&LineFilter{Op: OpEq, By: LineFilterValue{Value: "bad"}},
 				},
 			},
 		},
@@ -191,7 +219,7 @@ var tests = []TestCase{
 				},
 			},
 			Pipeline: []PipelineStage{
-				&LineFilter{Op: OpEq, Value: "bad"},
+				&LineFilter{Op: OpEq, By: LineFilterValue{Value: "bad"}},
 				&LogfmtExpressionParser{},
 				&JSONExpressionParser{},
 				&RegexpLabelParser{
@@ -200,7 +228,7 @@ var tests = []TestCase{
 						1: "method",
 					},
 				},
-				&PatternLabelParser{Pattern: "<ip>"},
+				&PatternLabelParser{Pattern: logqlpattern.MustParse("<ip>", logqlpattern.ExtractorFlags)},
 				&UnpackLabelParser{},
 				&LineFormat{Template: "{{ . }}"},
 				&DecolorizeExpr{},
@@ -223,7 +251,7 @@ var tests = []TestCase{
 				},
 			},
 			Pipeline: []PipelineStage{
-				&LineFilter{Op: OpEq, Value: "bad"},
+				&LineFilter{Op: OpEq, By: LineFilterValue{Value: "bad"}},
 				&JSONExpressionParser{},
 				&JSONExpressionParser{
 					Labels: []Label{
@@ -242,6 +270,35 @@ var tests = []TestCase{
 						{"foo", "10"},
 						{"bar", "sus"},
 					},
+				},
+			},
+		},
+		false,
+	},
+	{
+		`{name="kafka"}
+				| logfmt --keep-empty
+				| logfmt --strict
+				| logfmt --strict --keep-empty foo="10"
+			`,
+		&LogExpr{
+			Sel: Selector{
+				Matchers: []LabelMatcher{
+					{"name", OpEq, "kafka", nil},
+				},
+			},
+			Pipeline: []PipelineStage{
+				&LogfmtExpressionParser{
+					Flags: LogfmtFlagKeepEmpty,
+				},
+				&LogfmtExpressionParser{
+					Flags: LogfmtFlagStrict,
+				},
+				&LogfmtExpressionParser{
+					Exprs: []LabelExtractionExpr{
+						{"foo", "10"},
+					},
+					Flags: LogfmtFlagStrict | LogfmtFlagKeepEmpty,
 				},
 			},
 		},
@@ -298,7 +355,7 @@ var tests = []TestCase{
 	},
 	{
 		`{name="kafka"}
-				| label_format foo=foo
+				| label_format foo=bar
 				| label_format bar="bar"
 				| label_format foo=foo,bar="bar"
 			`,
@@ -311,7 +368,7 @@ var tests = []TestCase{
 			Pipeline: []PipelineStage{
 				&LabelFormatExpr{
 					Labels: []RenameLabel{
-						{"foo", "foo"},
+						{To: "foo", From: "bar"},
 					},
 				},
 				&LabelFormatExpr{
@@ -413,7 +470,8 @@ var tests = []TestCase{
 	{
 		`{instance=~"kafka-1",name="kafka"}
 				| duration >= 20ms or size == 20kb and method!~"2.."
-				| ip == ip("127.0.0.1")`,
+				| ip = ip("127.0.0.1")
+				| ip != ip("127.0.0.255")`,
 		&LogExpr{
 			Sel: Selector{
 				Matchers: []LabelMatcher{
@@ -424,17 +482,20 @@ var tests = []TestCase{
 			Pipeline: []PipelineStage{
 				&LabelFilter{
 					Pred: &LabelPredicateBinOp{
-						Left: &DurationFilter{"duration", OpGte, 20 * time.Millisecond},
-						Op:   OpOr,
-						Right: &LabelPredicateBinOp{
-							Left:  &BytesFilter{"size", OpEq, 20 * 1000}, // 20kb
-							Op:    OpAnd,
-							Right: &LabelMatcher{"method", OpNotRe, "2..", regexp.MustCompile(`^(?:2..)$`)},
+						Left: &LabelPredicateBinOp{
+							Left:  &DurationFilter{"duration", OpGte, 20 * time.Millisecond},
+							Op:    OpOr,
+							Right: &BytesFilter{"size", OpEq, 20 * 1000}, // 20kb
 						},
+						Op:    OpAnd,
+						Right: &LabelMatcher{"method", OpNotRe, "2..", regexp.MustCompile(`^(?:2..)$`)},
 					},
 				},
 				&LabelFilter{
 					Pred: &IPFilter{"ip", OpEq, "127.0.0.1"},
+				},
+				&LabelFilter{
+					Pred: &IPFilter{"ip", OpNotEq, "127.0.0.255"},
 				},
 			},
 		},
@@ -452,12 +513,65 @@ var tests = []TestCase{
 			Pipeline: []PipelineStage{
 				&LabelFilter{
 					Pred: &LabelPredicateBinOp{
+						Left: &LabelPredicateBinOp{
+							Left:  &DurationFilter{"duration", OpGte, 20 * time.Millisecond},
+							Op:    OpOr,
+							Right: &BytesFilter{"size", OpLt, 20 * 1000 * 1000}, // 20MB
+						},
+						Op:    OpOr,
+						Right: &BytesFilter{"size", OpLte, 20 * 1024 * 1024}, // 20MiB
+					},
+				},
+			},
+		},
+		false,
+	},
+	// See https://grafana.com/docs/loki/latest/query/log_queries/#label-filter-expression.
+	{
+		`{name="kafka"}
+				| duration >= 20ms or method="GET" and size <= 20KB`,
+		&LogExpr{
+			Sel: Selector{
+				Matchers: []LabelMatcher{
+					{"name", OpEq, "kafka", nil},
+				},
+			},
+			Pipeline: []PipelineStage{
+				&LabelFilter{
+					Pred: &LabelPredicateBinOp{
+						Left: &LabelPredicateBinOp{
+							Left:  &DurationFilter{"duration", OpGte, 20 * time.Millisecond},
+							Op:    OpOr,
+							Right: &LabelMatcher{"method", OpEq, "GET", nil},
+						},
+						Op:    OpAnd,
+						Right: &BytesFilter{"size", OpLte, 20 * 1000}, // 20KB
+					},
+				},
+			},
+		},
+		false,
+	},
+	{
+		`{name="kafka"}
+				| duration >= 20ms or (method="GET" and size <= 20KB)`,
+		&LogExpr{
+			Sel: Selector{
+				Matchers: []LabelMatcher{
+					{"name", OpEq, "kafka", nil},
+				},
+			},
+			Pipeline: []PipelineStage{
+				&LabelFilter{
+					Pred: &LabelPredicateBinOp{
 						Left: &DurationFilter{"duration", OpGte, 20 * time.Millisecond},
 						Op:   OpOr,
-						Right: &LabelPredicateBinOp{
-							Left:  &BytesFilter{"size", OpLt, 20 * 1000 * 1000}, // 20MB
-							Op:    OpOr,
-							Right: &BytesFilter{"size", OpLte, 20 * 1024 * 1024}, // 20MiB
+						Right: &LabelPredicateParen{
+							X: &LabelPredicateBinOp{
+								Left:  &LabelMatcher{"method", OpEq, "GET", nil},
+								Op:    OpAnd,
+								Right: &BytesFilter{"size", OpLte, 20 * 1000}, // 20KB
+							},
 						},
 					},
 				},
@@ -519,7 +633,7 @@ var tests = []TestCase{
 					},
 				},
 				Pipeline: []PipelineStage{
-					&LineFilter{Op: OpEq, Value: "error"},
+					&LineFilter{Op: OpEq, By: LineFilterValue{Value: "error"}},
 					&LogfmtExpressionParser{},
 				},
 				Unwrap: &UnwrapExpr{
@@ -571,7 +685,7 @@ var tests = []TestCase{
 					},
 				},
 				Pipeline: []PipelineStage{
-					&LineFilter{Op: OpEq, Value: "error"},
+					&LineFilter{Op: OpEq, By: LineFilterValue{Value: "error"}},
 				},
 				Unwrap: &UnwrapExpr{
 					Label: "duration",
@@ -592,7 +706,7 @@ var tests = []TestCase{
 					},
 				},
 				Pipeline: []PipelineStage{
-					&LineFilter{Op: OpEq, Value: "error"},
+					&LineFilter{Op: OpEq, By: LineFilterValue{Value: "error"}},
 				},
 				Unwrap: &UnwrapExpr{
 					Op:    "duration",
@@ -642,8 +756,8 @@ var tests = []TestCase{
 						},
 					},
 					Pipeline: []PipelineStage{
-						&LineFilter{Op: OpEq, Value: "error"},
-						&LineFilter{Op: OpNotEq, Value: "timeout"},
+						&LineFilter{Op: OpEq, By: LineFilterValue{Value: "error"}},
+						&LineFilter{Op: OpNotEq, By: LineFilterValue{Value: "timeout"}},
 						&JSONExpressionParser{},
 						&LabelFilter{
 							Pred: &DurationFilter{"duration", OpGt, 10 * time.Second},
@@ -864,35 +978,6 @@ var tests = []TestCase{
 		false,
 	},
 	{
-		`0-1+2*3/4%5^6`,
-		&BinOpExpr{
-			Left: &LiteralExpr{Value: 0},
-			Op:   OpSub,
-			Right: &BinOpExpr{
-				Left: &LiteralExpr{Value: 1},
-				Op:   OpAdd,
-				Right: &BinOpExpr{
-					Left: &LiteralExpr{Value: 2},
-					Op:   OpMul,
-					Right: &BinOpExpr{
-						Left: &LiteralExpr{Value: 3},
-						Op:   OpDiv,
-						Right: &BinOpExpr{
-							Left: &LiteralExpr{Value: 4},
-							Op:   OpMod,
-							Right: &BinOpExpr{
-								Left:  &LiteralExpr{Value: 5},
-								Op:    OpPow,
-								Right: &LiteralExpr{Value: 6},
-							},
-						},
-					},
-				},
-			},
-		},
-		false,
-	},
-	{
 		`vector(2)*vector(3)+vector(4)`,
 		&BinOpExpr{
 			Left: &BinOpExpr{
@@ -908,17 +993,17 @@ var tests = []TestCase{
 	{
 		`vector(2)+vector(3)*vector(4)+vector(5)`,
 		&BinOpExpr{
-			Left: &VectorExpr{Value: 2},
-			Op:   OpAdd,
-			Right: &BinOpExpr{
-				Left: &BinOpExpr{
+			Left: &BinOpExpr{
+				Left: &VectorExpr{Value: 2},
+				Op:   OpAdd,
+				Right: &BinOpExpr{
 					Left:  &VectorExpr{Value: 3},
 					Op:    OpMul,
 					Right: &VectorExpr{Value: 4},
 				},
-				Op:    OpAdd,
-				Right: &VectorExpr{Value: 5},
 			},
+			Op:    OpAdd,
+			Right: &VectorExpr{Value: 5},
 		},
 		false,
 	},
@@ -1018,6 +1103,35 @@ var tests = []TestCase{
 		false,
 	},
 
+	// Explain.
+	{
+		`@explain {foo="bar"}`,
+		&ExplainExpr{
+			X: &LogExpr{
+				Sel: Selector{
+					Matchers: []LabelMatcher{
+						{Label: "foo", Op: OpEq, Value: "bar"},
+					},
+				},
+			},
+		},
+		false,
+	},
+	{
+		`@explain sum(vector(2)*vector(2))`,
+		&ExplainExpr{
+			X: &VectorAggregationExpr{
+				Op: VectorOpSum,
+				Expr: &BinOpExpr{
+					Left:  &VectorExpr{Value: 2},
+					Op:    OpMul,
+					Right: &VectorExpr{Value: 2},
+				},
+			},
+		},
+		false,
+	},
+
 	// Invalid syntax.
 	{"{", nil, true},
 	{"{foo}", nil, true},
@@ -1044,6 +1158,8 @@ var tests = []TestCase{
 	{`{foo = "bar"} | unwrap label`, nil, true},
 	{`{foo = "bar"} |= foo`, nil, true},
 	{`{foo = "bar"} |= ip("foo"`, nil, true},
+	{`{foo = "bar"} |= ip("foo") or ip(`, nil, true},
+	{`{foo = "bar"} |= ip("foo") or ip("foo"`, nil, true},
 	// Tail expression
 	{`{foo = "bar"} |= "foo" {}`, nil, true},
 	// Missing identifier.
@@ -1057,6 +1173,9 @@ var tests = []TestCase{
 	{`{foo = "bar"} | drop`, nil, true},
 	{`{foo = "bar"} | drop foo,`, nil, true},
 	{`{foo = "bar"} | drop foo=`, nil, true},
+	// Missing expression.
+	{`{foo = "bar"} |= "foo" or`, nil, true},
+	{`{foo = "bar"} | label="foo",`, nil, true},
 	// Missing string value.
 	{`{foo = "bar"} | json bar=`, nil, true},
 	{`{foo = "bar"} | regexp`, nil, true},
@@ -1064,6 +1183,7 @@ var tests = []TestCase{
 	{`{foo = "bar"} | line_format`, nil, true},
 	{`{foo = "bar"} | addr == ip()`, nil, true},
 	{`{foo = "bar"} |= ip()`, nil, true},
+	{`{foo = "bar"} |= ip("foo") or ip()`, nil, true},
 	// Invalid comparison operation.
 	{`{foo = "bar"} | addr >= ip("127.0.0.1")`, nil, true},
 	{`{foo = "bar"} |~ ip("127.0.0.1")`, nil, true},
@@ -1071,6 +1191,8 @@ var tests = []TestCase{
 	{`{foo = "bar"} | status = 10`, nil, true},
 	{`{foo = "bar"} | status = 10s`, nil, true},
 	{`{foo = "bar"} | status = 10b`, nil, true},
+	// Unknown flag.
+	{`{foo = "bar"} | logfmt --unknown-flag`, nil, true},
 	// Invalid logical operation.
 	{`1 and vector(1)`, nil, true},
 	{`1 or vector(1)`, nil, true},
@@ -1110,15 +1232,30 @@ var tests = []TestCase{
 	{`{foo = "bar"} | label_format status=foo,status=bar`, nil, true},
 
 	// Invalid regexp.
+	//
 	{`{foo=~"\\"}`, nil, true},
 	{`{} |~ "\\"`, nil, true},
+	{`{} |~ ".+" or "\\"`, nil, true},
 	{`{} | regexp "\\"`, nil, true},
 	{`{} | foo=~"\\"`, nil, true},
 	{`label_replace(rate({job="mysql"}[1m]), "dst", "replacement", "src", "\\")`, nil, true},
+	// No capture.
+	{`{} | regexp "a"`, nil, true},
+	{`{} | regexp "a (\\w+)"`, nil, true},
 	// Duplicate capture.
 	{`{} | regexp "(?P<method>\\w+)(?P<method>\\w+)"`, nil, true},
 	// Invalid capture name.
 	{`{} | regexp "(?P<0a>\\w+)"`, nil, true},
+
+	// Invalid pattern.
+	//
+	// No capture.
+	{`{} | pattern "a"`, nil, true},
+	{`{} | pattern "a <_> a"`, nil, true},
+	// Duplicate capture.
+	{`{} | pattern "<a> foo <a>"`, nil, true},
+	// Consecutive capture.
+	{`{} | pattern "<a><b>"`, nil, true},
 }
 
 func TestParse(t *testing.T) {

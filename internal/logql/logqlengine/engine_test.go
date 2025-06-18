@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-faster/errors"
 	"github.com/go-faster/jx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/go-faster/oteldb/internal/iterators"
 	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlabels"
 	"github.com/go-faster/oteldb/internal/logstorage"
 	"github.com/go-faster/oteldb/internal/lokiapi"
 	"github.com/go-faster/oteldb/internal/otelstorage"
@@ -36,40 +38,61 @@ type mockQuerier struct {
 	step  time.Duration
 }
 
+var _ Querier = (*mockQuerier)(nil)
+
 func (m *mockQuerier) Capabilities() (caps QuerierCapabilities) {
 	return caps
 }
 
-func (m *mockQuerier) SelectLogs(_ context.Context, start, _ otelstorage.Timestamp, _ SelectLogsParams) (iterators.Iterator[logstorage.Record], error) {
-	step := m.step
+func (m *mockQuerier) Query(ctx context.Context, selector []logql.LabelMatcher) (PipelineNode, error) {
+	return &mockPipelineNode{
+		querier: m,
+	}, nil
+}
+
+type mockPipelineNode struct {
+	querier *mockQuerier
+}
+
+var _ PipelineNode = (*mockPipelineNode)(nil)
+
+func (n *mockPipelineNode) Traverse(cb NodeVisitor) error {
+	return cb(n)
+}
+
+func (n *mockPipelineNode) EvalPipeline(ctx context.Context, params EvalParams) (EntryIterator, error) {
+	var (
+		step      = n.querier.step
+		ts        = params.Start
+		direction = params.Direction
+	)
 	if step == 0 {
 		step = time.Millisecond
 	}
-	ts := start.AsTime()
+
+	if direction != DirectionForward {
+		return nil, errors.Errorf("test: direction %q is unsupported", direction)
+	}
 
 	var (
-		records    []logstorage.Record
+		entries    []Entry
 		scopeAttrs = pcommon.NewMap()
 		resAttrs   = pcommon.NewMap()
 	)
 	scopeAttrs.PutStr("scope", "test")
 	resAttrs.PutStr("resource", "test")
 
-	for _, l := range m.lines {
+	for _, l := range n.querier.lines {
+		var (
+			line  = l.line
+			attrs = pcommon.NewMap()
+		)
 		ts = ts.Add(step)
-		body := l.line
-		rec := logstorage.Record{
-			Timestamp:     otelstorage.NewTimestampFromTime(ts),
-			Body:          l.line,
-			Attrs:         otelstorage.Attrs(l.attrs),
-			ScopeAttrs:    otelstorage.Attrs(scopeAttrs),
-			ResourceAttrs: otelstorage.Attrs(resAttrs),
+		if l.attrs != (pcommon.Map{}) {
+			l.attrs.CopyTo(attrs)
 		}
-		if rec.Attrs == otelstorage.Attrs(pcommon.Map{}) {
-			rec.Attrs = otelstorage.Attrs(pcommon.NewMap())
-		}
-		if dec := jx.DecodeStr(body); dec.Next() == jx.Object {
-			rec.Body = ""
+
+		if dec := jx.DecodeStr(line); dec.Next() == jx.Object {
 			if err := dec.Obj(func(d *jx.Decoder, key string) error {
 				switch key {
 				case logstorage.LabelBody:
@@ -77,7 +100,7 @@ func (m *mockQuerier) SelectLogs(_ context.Context, start, _ otelstorage.Timesta
 					if err != nil {
 						return err
 					}
-					rec.Body = v
+					line = v
 					return nil
 				case logstorage.LabelTraceID:
 					v, err := d.Str()
@@ -88,7 +111,7 @@ func (m *mockQuerier) SelectLogs(_ context.Context, start, _ otelstorage.Timesta
 					if err != nil {
 						return err
 					}
-					rec.TraceID = traceID
+					attrs.PutStr(logstorage.LabelTraceID, traceID.Hex())
 					return nil
 				default:
 					switch d.Next() {
@@ -97,14 +120,14 @@ func (m *mockQuerier) SelectLogs(_ context.Context, start, _ otelstorage.Timesta
 						if err != nil {
 							return err
 						}
-						rec.Attrs.AsMap().PutStr(key, v)
+						attrs.PutStr(key, v)
 						return nil
 					case jx.Bool:
 						v, err := d.Bool()
 						if err != nil {
 							return err
 						}
-						rec.Attrs.AsMap().PutBool(key, v)
+						attrs.PutBool(key, v)
 						return nil
 					case jx.Number:
 						v, err := d.Num()
@@ -116,13 +139,13 @@ func (m *mockQuerier) SelectLogs(_ context.Context, start, _ otelstorage.Timesta
 							if err != nil {
 								return err
 							}
-							rec.Attrs.AsMap().PutInt(key, n)
+							attrs.PutInt(key, n)
 						} else {
 							n, err := v.Float64()
 							if err != nil {
 								return err
 							}
-							rec.Attrs.AsMap().PutDouble(key, n)
+							attrs.PutDouble(key, n)
 						}
 						return nil
 					default:
@@ -130,7 +153,7 @@ func (m *mockQuerier) SelectLogs(_ context.Context, start, _ otelstorage.Timesta
 						if err != nil {
 							return err
 						}
-						rec.Attrs.AsMap().PutStr(key, string(v))
+						attrs.PutStr(key, string(v))
 						return nil
 					}
 				}
@@ -138,10 +161,21 @@ func (m *mockQuerier) SelectLogs(_ context.Context, start, _ otelstorage.Timesta
 				return nil, err
 			}
 		}
-		records = append(records, rec)
+
+		set := logqlabels.NewLabelSet()
+		set.SetAttrs(
+			otelstorage.Attrs(attrs),
+			otelstorage.Attrs(scopeAttrs),
+			otelstorage.Attrs(resAttrs),
+		)
+		entries = append(entries, Entry{
+			Timestamp: otelstorage.NewTimestampFromTime(ts),
+			Line:      line,
+			Set:       set,
+		})
 	}
 
-	return iterators.Slice(records), nil
+	return iterators.Slice(entries), nil
 }
 
 func justLines(lines ...string) []inputLine {
@@ -192,7 +226,7 @@ var (
 )
 
 func TestEngineEvalStream(t *testing.T) {
-	startTime := otelstorage.Timestamp(1688833731000000000)
+	startTime := otelstorage.Timestamp(1688833731000000000).AsTime()
 
 	tests := []struct {
 		query    string
@@ -439,9 +473,10 @@ func TestEngineEvalStream(t *testing.T) {
 			opts := Options{
 				ParseOptions: logql.ParseOptions{AllowDots: true},
 			}
-			e := NewEngine(&mockQuerier{lines: tt.input}, opts)
+			e, err := NewEngine(&mockQuerier{lines: tt.input}, opts)
+			require.NoError(t, err)
 
-			gotData, err := e.Eval(ctx, tt.query, EvalParams{
+			gotData, err := eval(ctx, e, tt.query, EvalParams{
 				Start: startTime,
 				End:   startTime,
 				Limit: 1000,
@@ -503,6 +538,14 @@ func TestEngineEvalStream(t *testing.T) {
 	}
 }
 
+func eval(ctx context.Context, e *Engine, query string, params EvalParams) (r lokiapi.QueryResponseData, _ error) {
+	q, err := e.NewQuery(ctx, query)
+	if err != nil {
+		return r, err
+	}
+	return q.Eval(ctx, params)
+}
+
 type timeRange struct {
 	start uint64
 	end   uint64
@@ -535,6 +578,8 @@ func TestEngineEvalLiteral(t *testing.T) {
 								{T: 1700000001, V: result},
 								{T: 1700000002, V: result},
 								{T: 1700000003, V: result},
+								// Loki includes one step after end, so we do.
+								{T: 1700000004, V: result},
 							},
 						},
 					},
@@ -580,6 +625,7 @@ func TestEngineEvalLiteral(t *testing.T) {
 								{T: 1700000001, V: "3.14"},
 								{T: 1700000002, V: "3.14"},
 								{T: 1700000003, V: "3.14"},
+								{T: 1700000004, V: "3.14"},
 							},
 						},
 					},
@@ -613,6 +659,9 @@ func TestEngineEvalLiteral(t *testing.T) {
 		},
 		test3steps(`vector(3.14)`, "3.14"),
 
+		// Literal binary operation test.
+		test3steps(`label_replace(vector(3), "dst", "$0", "src", ".+") * vector(3)`, "9"),
+
 		// Precedence tests.
 		test3steps(`vector(2)+vector(3)*vector(4)`, "14"),
 		test3steps(`vector(2)*vector(3)+vector(4)`, "10"),
@@ -631,11 +680,12 @@ func TestEngineEvalLiteral(t *testing.T) {
 			opts := Options{
 				ParseOptions: logql.ParseOptions{AllowDots: true},
 			}
-			e := NewEngine(&mockQuerier{}, opts)
+			e, err := NewEngine(&mockQuerier{}, opts)
+			require.NoError(t, err)
 
-			gotData, err := e.Eval(ctx, tt.query, EvalParams{
-				Start: otelstorage.Timestamp(tt.tsRange.start),
-				End:   otelstorage.Timestamp(tt.tsRange.end),
+			gotData, err := eval(ctx, e, tt.query, EvalParams{
+				Start: otelstorage.Timestamp(tt.tsRange.start).AsTime(),
+				End:   otelstorage.Timestamp(tt.tsRange.end).AsTime(),
 				Step:  tt.tsRange.step,
 				Limit: 1000,
 			})

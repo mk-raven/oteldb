@@ -2,7 +2,7 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -25,7 +25,7 @@ jobs:
           fetch-depth: 0
       - run: git fetch --force --tags
 
-      - uses: sigstore/cosign-installer@v3.3.0
+      - uses: sigstore/cosign-installer@v3.9.0
       - uses: anchore/sbom-action/download-syft@v0
       - run: sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
 
@@ -34,7 +34,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.21.x"
+          go-version: stable
           cache: false
 
       - name: Get Go environment
@@ -45,7 +45,7 @@ jobs:
           echo "goversion=$(go env GOVERSION)" >> $GITHUB_ENV
 
       - name: Set up cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ${{ env.cache }}
@@ -54,7 +54,7 @@ jobs:
           restore-keys: |
             release-${{ runner.os }}-go-${{ env.goversion }}
 
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         name: Releaser cache
         with:
           path: |
@@ -72,7 +72,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: goreleaser-install
-        uses: goreleaser/goreleaser-action@v5
+        uses: goreleaser/goreleaser-action@v6
         with:
           install-only: true
 

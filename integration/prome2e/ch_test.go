@@ -10,9 +10,11 @@ import (
 	"github.com/ClickHouse/ch-go/chpool"
 	"github.com/cenkalti/backoff/v4"
 	"github.com/go-faster/errors"
+	"github.com/go-faster/sdk/zctx"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
+	testcontainerslog "github.com/testcontainers/testcontainers-go/log"
 
 	"github.com/go-faster/oteldb/integration"
 	"github.com/go-faster/oteldb/internal/chstorage"
@@ -22,16 +24,17 @@ func TestCH(t *testing.T) {
 	t.Parallel()
 	integration.Skip(t)
 	ctx := context.Background()
+	provider := integration.TraceProvider(t)
 
 	req := testcontainers.ContainerRequest{
 		Name:         "oteldb-prome2e-clickhouse",
-		Image:        "clickhouse/clickhouse-server:23.10",
+		Image:        "clickhouse/clickhouse-server:23.12",
 		ExposedPorts: []string{"8123/tcp", "9000/tcp"},
 	}
 	chContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
-		Logger:           testcontainers.TestLogger(t),
+		Logger:           testcontainerslog.TestLogger(t),
 		Reuse:            true,
 	})
 	require.NoError(t, err, "container start")
@@ -42,6 +45,9 @@ func TestCH(t *testing.T) {
 	opts := ch.Options{
 		Address:  endpoint,
 		Database: "default",
+
+		OpenTelemetryInstrumentation: true,
+		TracerProvider:               provider,
 	}
 
 	connectBackoff := backoff.NewExponentialBackOff()
@@ -70,11 +76,18 @@ func TestCH(t *testing.T) {
 	t.Logf("Test tables prefix: %s", prefix)
 	require.NoError(t, tables.Create(ctx, c))
 
-	inserter, err := chstorage.NewInserter(c, chstorage.InserterOptions{Tables: tables})
+	inserter, err := chstorage.NewInserter(c, chstorage.InserterOptions{
+		Tables:         tables,
+		TracerProvider: provider,
+	})
 	require.NoError(t, err)
 
-	querier, err := chstorage.NewQuerier(c, chstorage.QuerierOptions{Tables: tables})
+	querier, err := chstorage.NewQuerier(c, chstorage.QuerierOptions{
+		Tables:         tables,
+		TracerProvider: provider,
+	})
 	require.NoError(t, err)
 
-	runTest(ctx, t, inserter, querier, querier)
+	ctx = zctx.Base(ctx, integration.Logger(t))
+	runTest(ctx, t, provider, inserter, querier, querier)
 }

@@ -49,6 +49,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch elem[0] {
 		case '/': // Prefix: "/"
+
 			if l := len("/"); len(elem) >= l && elem[0:l] == "/" {
 				elem = elem[l:]
 			} else {
@@ -60,6 +61,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			switch elem[0] {
 			case 'd': // Prefix: "dummy"
+
 				if l := len("dummy"); len(elem) >= l && elem[0:l] == "dummy" {
 					elem = elem[l:]
 				} else {
@@ -77,7 +79,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 					return
 				}
+
 			case 'e': // Prefix: "envelope"
+
 				if l := len("envelope"); len(elem) >= l && elem[0:l] == "envelope" {
 					elem = elem[l:]
 				} else {
@@ -95,7 +99,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 					return
 				}
+
 			}
+
 		}
 	}
 	s.notFound(w, r)
@@ -177,6 +183,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 		}
 		switch elem[0] {
 		case '/': // Prefix: "/"
+
 			if l := len("/"); len(elem) >= l && elem[0:l] == "/" {
 				elem = elem[l:]
 			} else {
@@ -188,6 +195,7 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 			}
 			switch elem[0] {
 			case 'd': // Prefix: "dummy"
+
 				if l := len("dummy"); len(elem) >= l && elem[0:l] == "dummy" {
 					elem = elem[l:]
 				} else {
@@ -195,10 +203,10 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 				}
 
 				if len(elem) == 0 {
+					// Leaf node.
 					switch method {
 					case "GET":
-						// Leaf: Dummy
-						r.name = "Dummy"
+						r.name = DummyOperation
 						r.summary = ""
 						r.operationID = "dummy"
 						r.pathPattern = "/dummy"
@@ -209,7 +217,9 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 						return
 					}
 				}
+
 			case 'e': // Prefix: "envelope"
+
 				if l := len("envelope"); len(elem) >= l && elem[0:l] == "envelope" {
 					elem = elem[l:]
 				} else {
@@ -217,10 +227,10 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 				}
 
 				if len(elem) == 0 {
+					// Leaf node.
 					switch method {
 					case "POST":
-						// Leaf: Envelope
-						r.name = "Envelope"
+						r.name = EnvelopeOperation
 						r.summary = ""
 						r.operationID = "envelope"
 						r.pathPattern = "/envelope"
@@ -231,7 +241,9 @@ func (s *Server) FindPath(method string, u *url.URL) (r Route, _ bool) {
 						return
 					}
 				}
+
 			}
+
 		}
 	}
 	return r, false

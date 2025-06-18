@@ -1,12 +1,11 @@
 package chstorage
 
 import (
-	"github.com/ClickHouse/ch-go/chpool"
+	"github.com/go-faster/errors"
+	"github.com/go-faster/sdk/autometric"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
-
-	"github.com/go-faster/errors"
 
 	"github.com/go-faster/oteldb/internal/tracestorage"
 )
@@ -15,13 +14,24 @@ var _ tracestorage.Inserter = (*Inserter)(nil)
 
 // Inserter implements tracestorage.Inserter using Clickhouse.
 type Inserter struct {
-	ch     *chpool.Pool
+	ch     ClickhouseClient
 	tables Tables
 
-	insertedSpans   metric.Int64Counter
-	insertedTags    metric.Int64Counter
-	insertedRecords metric.Int64Counter
-
+	stats struct {
+		// Logs.
+		InsertedRecords   metric.Int64Counter `name:"logs.inserted_records" description:"Number of inserted log records"`
+		InsertedLogLabels metric.Int64Counter `name:"logs.inserted_log_labels" description:"Number of inserted log labels"`
+		// Metrics.
+		InsertedPoints       metric.Int64Counter `name:"metrics.inserted_points" description:"Number of inserted points"`
+		InsertedHistograms   metric.Int64Counter `name:"metrics.inserted_histograms" description:"Number of inserted exponential (native) histograms"`
+		InsertedExemplars    metric.Int64Counter `name:"metrics.inserted_exemplars" description:"Number of inserted exemplars"`
+		InsertedMetricLabels metric.Int64Counter `name:"metrics.inserted_metric_labels" description:"Number of inserted metric labels"`
+		// Traces.
+		InsertedSpans metric.Int64Counter `name:"traces.inserted_spans" description:"Number of inserted spans"`
+		InsertedTags  metric.Int64Counter `name:"traces.inserted_tags" description:"Number of inserted trace attributes"`
+		// Common.
+		Inserts metric.Int64Counter `name:"inserts" description:"Number of insert invocations"`
+	}
 	tracer trace.Tracer
 }
 
@@ -48,29 +58,24 @@ func (opts *InserterOptions) setDefaults() {
 }
 
 // NewInserter creates new Inserter.
-func NewInserter(c *chpool.Pool, opts InserterOptions) (*Inserter, error) {
+func NewInserter(c ClickhouseClient, opts InserterOptions) (*Inserter, error) {
+	// HACK(ernado): for some reason, we are getting no-op here.
+	opts.TracerProvider = otel.GetTracerProvider()
+	opts.MeterProvider = otel.GetMeterProvider()
 	opts.setDefaults()
 
-	meter := opts.MeterProvider.Meter("chstorage.Inserter")
-	insertedSpans, err := meter.Int64Counter("chstorage.traces.inserted_spans")
-	if err != nil {
-		return nil, errors.Wrap(err, "create inserted_spans")
-	}
-	insertedTags, err := meter.Int64Counter("chstorage.traces.inserted_tags")
-	if err != nil {
-		return nil, errors.Wrap(err, "create inserted_tags")
-	}
-	insertedRecords, err := meter.Int64Counter("chstorage.traces.inserted_records")
-	if err != nil {
-		return nil, errors.Wrap(err, "create inserted_records")
+	inserter := &Inserter{
+		ch:     c,
+		tables: opts.Tables,
+		tracer: opts.TracerProvider.Tracer("chstorage.Inserter"),
 	}
 
-	return &Inserter{
-		ch:              c,
-		tables:          opts.Tables,
-		insertedSpans:   insertedSpans,
-		insertedTags:    insertedTags,
-		insertedRecords: insertedRecords,
-		tracer:          opts.TracerProvider.Tracer("chstorage.Inserter"),
-	}, nil
+	meter := opts.MeterProvider.Meter("chstorage.Inserter")
+	if err := autometric.Init(meter, &inserter.stats, autometric.InitOptions{
+		Prefix: "chstorage.",
+	}); err != nil {
+		return nil, errors.Wrap(err, "init stats")
+	}
+
+	return inserter, nil
 }

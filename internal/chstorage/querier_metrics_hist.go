@@ -92,8 +92,14 @@ func (p *expHistIterator) loadValue() (h histogram.Histogram, _ error) {
 		scale = 8
 	}
 
-	pSpans, pDeltas := convertBucketsLayout(p.values.positiveOffset[p.n], p.values.positiveBucketCounts[p.n], scaleDown)
-	nSpans, nDeltas := convertBucketsLayout(p.values.negativeOffset[p.n], p.values.negativeBucketCounts[p.n], scaleDown)
+	pSpans, pDeltas, err := convertBucketsLayout(p.values.positiveOffset[p.n], p.values.positiveBucketCounts[p.n], scaleDown)
+	if err != nil {
+		return h, errors.Wrap(err, "convert positive buckets")
+	}
+	nSpans, nDeltas, err := convertBucketsLayout(p.values.negativeOffset[p.n], p.values.negativeBucketCounts[p.n], scaleDown)
+	if err != nil {
+		return h, errors.Wrap(err, "convert negative buckets")
+	}
 
 	h = histogram.Histogram{
 		Schema: scale,
@@ -131,10 +137,13 @@ func (p *expHistIterator) loadValue() (h histogram.Histogram, _ error) {
 // to the range (base 1].
 //
 // scaleDown is the factor by which the buckets are scaled down. In other words 2^scaleDown buckets will be merged into one.
-func convertBucketsLayout(offset int32, bucketCounts []uint64, scaleDown int32) (spans []histogram.Span, deltas []int64) {
+func convertBucketsLayout(offset int32, bucketCounts []uint64, scaleDown int32) (spans []histogram.Span, deltas []int64, err error) {
 	numBuckets := len(bucketCounts)
-	if numBuckets == 0 {
-		return nil, nil
+	switch {
+	case numBuckets == 0:
+		return nil, nil, nil
+	case numBuckets > math.MaxInt32:
+		return nil, nil, errors.Errorf("too much buckets (%d is overflowing int32)", numBuckets)
 	}
 
 	var (
@@ -206,7 +215,7 @@ func convertBucketsLayout(offset int32, bucketCounts []uint64, scaleDown int32) 
 	}
 	appendDelta(count)
 
-	return spans, deltas
+	return spans, deltas, nil
 }
 
 // At returns the current timestamp/value pair if the value is a float.
@@ -218,7 +227,7 @@ func (p *expHistIterator) At() (t int64, v float64) {
 // AtHistogram returns the current timestamp/value pair if the value is
 // a histogram with integer counts. Before the iterator has advanced,
 // the behavior is unspecified.
-func (p *expHistIterator) AtHistogram() (t int64, h *histogram.Histogram) {
+func (p *expHistIterator) AtHistogram(*histogram.Histogram) (t int64, h *histogram.Histogram) {
 	t = p.AtT()
 	h = &p.current
 	return t, h
@@ -229,7 +238,7 @@ func (p *expHistIterator) AtHistogram() (t int64, h *histogram.Histogram) {
 // value is a histogram with integer counts, in which case a
 // FloatHistogram copy of the histogram is returned. Before the iterator
 // has advanced, the behavior is unspecified.
-func (p *expHistIterator) AtFloatHistogram() (int64, *histogram.FloatHistogram) {
+func (p *expHistIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
 	return 0, nil
 }
 

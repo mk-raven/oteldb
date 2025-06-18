@@ -22,20 +22,13 @@ type Querier interface {
 	SelectSpansets(ctx context.Context, params SelectSpansetsParams) (iterators.Iterator[Trace], error)
 }
 
-// SpanMatcher defines span predicate to select.
-type SpanMatcher struct {
-	Attribute traceql.Attribute
-	Op        traceql.BinaryOp // could be zero, look for spans with such attribute
-	Static    traceql.Static
-}
-
 // SelectSpansetsParams is a storage query params.
 type SelectSpansetsParams struct {
 	Op       traceql.SpansetOp // OpAnd, OpOr
-	Matchers []SpanMatcher
+	Matchers []traceql.SpanMatcher
 
 	// Time range to query, optional.
-	Start, End otelstorage.Timestamp
+	Start, End time.Time
 
 	// Trace duration, querier should ignore field, if it is zero.
 	// TODO(tdakkota): probably, we can put it as SpanMatcher with traceDuration attribute

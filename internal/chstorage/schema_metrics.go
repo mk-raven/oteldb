@@ -22,24 +22,6 @@ const (
 )
 
 const (
-	pointsSchema = `CREATE TABLE IF NOT EXISTS %s
-	(
-		name LowCardinality(String),
-		timestamp DateTime64(9) CODEC(Delta, ZSTD(1)),
-
-		mapping Enum8(` + metricMappingDDL + `) CODEC(T64),
-		value Float64 CODEC(Gorilla),
-
-		flags	    UInt8  CODEC(T64),
-		attributes	String,
-		resource	String,
-	
-		INDEX idx_ts timestamp TYPE minmax GRANULARITY 8192
-	)
-	ENGINE = MergeTree()
-	PARTITION BY toYYYYMMDD(timestamp)
-	PRIMARY KEY (name, mapping, cityHash64(resource), cityHash64(attributes))
-	ORDER BY (name, mapping, cityHash64(resource), cityHash64(attributes), timestamp);`
 	metricMappingDDL = `
 		'NO_MAPPING' = 0,
 		'HISTOGRAM_COUNT' = 1,
@@ -51,91 +33,11 @@ const (
 		'SUMMARY_SUM' = 7,
 		'SUMMARY_QUANTILE' = 8
 		`
-	histogramsSchema = `CREATE TABLE IF NOT EXISTS %s
-	(
-		name LowCardinality(String),
-		timestamp DateTime64(9) CODEC(Delta, ZSTD(1)),
-
-		histogram_count UInt64,
-		histogram_sum Nullable(Float64),
-		histogram_min Nullable(Float64),
-		histogram_max Nullable(Float64),
-		histogram_bucket_counts Array(UInt64),
-		histogram_explicit_bounds Array(Float64),
-
-		flags	UInt32,
-		attributes	String,
-		resource	String
-	)
-	ENGINE = MergeTree()
-	ORDER BY timestamp;`
-	expHistogramsSchema = `CREATE TABLE IF NOT EXISTS %s
-	(
-		name LowCardinality(String),
-		timestamp DateTime64(9) CODEC(Delta, ZSTD(1)),
-
-		exp_histogram_count UInt64,
-		exp_histogram_sum Nullable(Float64),
-		exp_histogram_min Nullable(Float64),
-		exp_histogram_max Nullable(Float64),
-		exp_histogram_scale Int32,
-		exp_histogram_zerocount UInt64,
-		exp_histogram_positive_offset Int32,
-		exp_histogram_positive_bucket_counts Array(UInt64),
-		exp_histogram_negative_offset Int32,
-		exp_histogram_negative_bucket_counts Array(UInt64),
-
-		flags	UInt32,
-		attributes	String,
-		resource	String
-	)
-	ENGINE = MergeTree()
-	ORDER BY timestamp;`
-	summariesSchema = `CREATE TABLE IF NOT EXISTS %s
-	(
-		name LowCardinality(String),
-		timestamp DateTime64(9) CODEC(Delta, ZSTD(1)),
-
-		summary_count UInt64,
-		summary_sum Float64,
-		summary_quantiles Array(Float64),
-		summary_values Array(Float64),
-
-		flags	UInt32,
-		attributes	String,
-		resource	String
-	)
-	ENGINE = MergeTree()
-	ORDER BY timestamp;`
-	exemplarsSchema = `CREATE TABLE IF NOT EXISTS %s
-	(
-		name LowCardinality(String),
-		timestamp DateTime64(9) CODEC(Delta, ZSTD(1)),
-
-		filtered_attributes String,
-		exemplar_timestamp DateTime(9) CODEC(Delta, ZSTD(1)),
-		value Float64,
-		span_id FixedString(8),
-		trace_id FixedString(16),
-
-		attributes	String,
-		resource	String
-	)
-	ENGINE = MergeTree()
-	ORDER BY (name, cityHash64(resource), cityHash64(attributes), timestamp);`
-
-	labelsSchema = `CREATE TABLE IF NOT EXISTS %s
-	(
-		name  LowCardinality(String),
-		key   LowCardinality(String),
-		value String
-	)
-	ENGINE = ReplacingMergeTree
-	ORDER BY (name, value);`
+	metricLabelScopeDDL = `'NONE' = 0, 'RESOURCE' = 1, 'INSTRUMENTATION' = 2, 'ATTRIBUTE' = 4`
 )
 
-func parseLabels(s string, to map[string]string) error {
-	d := jx.DecodeStr(s)
+func parseLabels(s []byte, to map[string]string) error {
+	d := jx.DecodeBytes(s)
 	return d.ObjBytes(func(d *jx.Decoder, key []byte) error {
 		switch d.Next() {
 		case jx.String:

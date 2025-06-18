@@ -21,7 +21,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config/configauth"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configtls"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
@@ -31,22 +30,23 @@ func TestLoadConfig(t *testing.T) {
 	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
 	require.NoError(t, err)
 
+	typ := component.MustNewType(typeStr)
 	tests := []struct {
 		id       component.ID
 		expected component.Config
 	}{
 		{
-			id:       component.NewIDWithName(typeStr, "defaults"),
+			id:       component.NewIDWithName(typ, "defaults"),
 			expected: createDefaultConfig(),
 		},
 		{
-			id: component.NewIDWithName(typeStr, ""),
+			id: component.NewIDWithName(typ, ""),
 			expected: &Config{
-				HTTPServerSettings: confighttp.HTTPServerSettings{
+				ServerConfig: confighttp.ServerConfig{
 					Endpoint:           "0.0.0.0:19291",
-					TLSSetting:         (*configtls.TLSServerSetting)(nil),
-					CORS:               (*confighttp.CORSSettings)(nil),
-					Auth:               (*configauth.Authentication)(nil),
+					TLS:                (*configtls.ServerConfig)(nil),
+					CORS:               (*confighttp.CORSConfig)(nil),
+					Auth:               (*confighttp.AuthConfig)(nil),
 					MaxRequestBodySize: 0,
 					IncludeMetadata:    false,
 				},
@@ -62,7 +62,7 @@ func TestLoadConfig(t *testing.T) {
 
 			sub, err := cm.Sub(tt.id.String())
 			require.NoError(t, err)
-			require.NoError(t, component.UnmarshalConfig(sub, cfg))
+			require.NoError(t, sub.Unmarshal(&cfg))
 			assert.Equal(t, tt.expected, cfg)
 		})
 	}

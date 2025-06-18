@@ -1,0 +1,119 @@
+version: "3"
+
+volumes:
+  prom:
+
+services:
+  clickhouse:
+    image: "ghcr.io/go-faster/clickhouse-server:23.12"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:8123:8123"
+    volumes:
+      - ./clickhouse.xml:/etc/clickhouse-server/config.d/monitoring.xml:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "127.0.0.1:8123/ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  prometheus:
+    image: "ghcr.io/go-faster/prom/prometheus:v3.1.0"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - "./prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+    restart: unless-stopped
+
+  oteldb:
+    image: ghcr.io/go-faster/oteldb
+    build:
+      context: ../../../
+      dockerfile: Dockerfile
+    command:
+      - --config=/etc/otel/cfg.yml
+    volumes:
+      - ./oteldb.yml:/etc/otel/cfg.yml:ro
+    environment:
+      - PPROF_ADDR=0.0.0.0:9010
+      - OTELDB_STORAGE=ch
+      - OTEL_LOG_LEVEL=info
+      - OTEL_EXPORTER_PROMETHEUS_HOST=0.0.0.0
+      - OTEL_EXPORTER_PROMETHEUS_PORT=9464
+      - OTEL_METRICS_EXPORTER=prometheus
+      - OTEL_LOGS_EXPORTER=none
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_TRACES_SAMPLER=parentbased_always_off
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=go-faster.oteldb
+      - GOMAXPROCS=6
+      - GOMEMLIMIT=1500MiB
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "127.0.0.1:13133/liveness"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    ports:
+      - "127.0.0.1:9090:9090" # promql
+      - "127.0.0.1:9010:9010" # pprof
+      - "127.0.0.1:19291:19291" # prometheus remote write
+    depends_on:
+      - clickhouse
+
+  # Exports traces from clickhouse internal table to otel.
+  chotel:
+    image: ghcr.io/go-faster/oteldb/chotel
+    build:
+      context: ../../../
+      dockerfile: chotel.Dockerfile
+    restart: always
+    environment:
+      - OTEL_LOGS_EXPORTER=none
+      - OTEL_METRICS_EXPORTER=none
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_EXPORTER_OTLP_INSECURE=true
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=go-faster.oteldb.chotel
+      - CHOTEL_SEND_RATE=1s
+    depends_on:
+      - clickhouse
+
+  tempo:
+    image: "ghcr.io/go-faster/tempo"
+    command: ["-config.file=/etc/tempo.yml"]
+    ports:
+      - "127.0.0.1:3200:3200"
+    volumes:
+      - ./tempo.yml:/etc/tempo.yml:ro
+
+  # https://opentelemetry.io/docs/collector/installation/#docker-compose
+  otelcol:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.89.0
+    volumes:
+      - ./otelcol.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"
+    command:
+      - "--config"
+      - "/etc/otelcol-contrib/config.yaml"
+
+  grafana:
+    image: "ghcr.io/go-faster/grafana:11.5.0-pre"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,traceToMetrics,publicDashboards,tempoApmTable
+      - GF_ALERTING_ENABLED=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_LOG_LEVEL=debug
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/default.yml:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - oteldb
