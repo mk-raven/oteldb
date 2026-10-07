@@ -1,0 +1,1338 @@
+openapi: 3.0.3
+info:
+  title: oteldb admin panel API
+  description: >
+    Administrative API for an oteldb instance: instance info and effective
+    configuration, per-signal component health, ClickHouse storage statistics,
+    and runtime controls.
+  version: 0.1.0
+servers:
+  - url: "http://localhost:8090"
+paths:
+  /api/v1/info:
+    get:
+      operationId: "getInfo"
+      summary: "Instance info and effective config"
+      description: "Build information, uptime and per-signal backend configuration."
+      responses:
+        200:
+          description: Instance info.
+          content:
+            "application/json":
+              schema:
+                $ref: "#/components/schemas/InstanceInfo"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/health:
+    get:
+      operationId: "getHealth"
+      summary: "Component health"
+      description: "Health of each wired service (query APIs, collector, storage)."
+      parameters:
+        - $ref: "#/components/parameters/NodeParam"
+      responses:
+        200:
+          description: Health report.
+          content:
+            "application/json":
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/runtime:
+    get:
+      operationId: "getRuntime"
+      summary: "Go runtime statistics"
+      description: "Live heap, GC and goroutine counters of the running process."
+      parameters:
+        - $ref: "#/components/parameters/NodeParam"
+      responses:
+        200:
+          description: Runtime statistics.
+          content:
+            "application/json":
+              schema:
+                $ref: "#/components/schemas/RuntimeStats"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/storage:
+    get:
+      operationId: "getStorage"
+      summary: "ClickHouse storage statistics"
+      description: >
+        Per-table statistics (rows, on-disk and uncompressed bytes, parts,
+        min/max timestamp) collected from ClickHouse system tables. Empty when
+        no signal is served from ClickHouse.
+      parameters:
+        - $ref: "#/components/parameters/NodeParam"
+      responses:
+        200:
+          description: Storage statistics.
+          content:
+            "application/json":
+              schema:
+                $ref: "#/components/schemas/StorageStats"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/storage/efficiency:
+    get:
+      operationId: "getEfficiency"
+      summary: "Embedded storage efficiency statistics"
+      description: >
+        Per-tenant, per-signal capacity and efficiency breakdown of the
+        embedded storage engine: series, parts, points, stored bytes,
+        bytes per point and compression ratios. Unlike the other storage
+        endpoints this one performs backend I/O (per-part object sizes) —
+        poll it at dashboard cadence, not per request. Empty when the
+        embedded engine is not active.
+      parameters:
+        - $ref: "#/components/parameters/NodeParam"
+        - name: parts
+          in: query
+          required: false
+          description: >
+            Lists each signal's parts individually in `parts_detail`. A cluster-wide aggregator
+            needs part identities to count a replicated part once instead of once per replica;
+            a single-node dashboard does not, and the list grows with the part count, so it is
+            off by default.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        200:
+          description: Efficiency statistics.
+          content:
+            "application/json":
+              schema:
+                $ref: "#/components/schemas/EfficiencyStats"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/cluster/storage:
+    get:
+      operationId: "getClusterStorage"
+      summary: "Cluster-wide storage footprint"
+      description: >
+        Folds every member node's storage efficiency into one view, reporting the replicated
+        footprint and the deduplicated one side by side: summing per-node bytes counts a part
+        once per replica, which overstates how much data the cluster actually holds.
+
+        Served by a cluster-wide admin (odbadmin). A storage node sees only itself and answers
+        with an error.
+      responses:
+        200:
+          description: Cluster-wide storage footprint.
+          content:
+            "application/json":
+              schema:
+                $ref: "#/components/schemas/ClusterStorage"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/cluster/nodes:
+    get:
+      operationId: "getClusterNodes"
+      summary: "Cluster ring membership"
+      description: >
+        The members the aggregator fans out to, with the admin API address it reaches each on and
+        whether it answered. This is the cheap membership query behind a node selector:
+        /api/v1/cluster/storage carries the same list, but only as part of a storage report that
+        reads every part of every node.
+
+        Served by a cluster-wide admin (odbadmin). A storage node is a member of nothing it can
+        see from here and answers with an error.
+      responses:
+        200:
+          description: Cluster ring membership.
+          content:
+            "application/json":
+              schema:
+                $ref: "#/components/schemas/ClusterNodes"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/storage/stream-costs:
+    get:
+      operationId: "getStreamCosts"
+      summary: "Attribute a signal's stored bytes to streams"
+      description: >
+        Breaks a record signal's flushed parts down by stream, or by a stream label's values:
+        rows, decoded bytes, an approximate compressed share, and per-column distinct estimates.
+        This is the heaviest call the storage engine exposes — every accounted byte column of every
+        live part is read and decoded once — so it is an on-demand drill-down, not something to
+        poll. Narrow it with `columns` when only one column is in question.
+      parameters:
+        - $ref: "#/components/parameters/NodeParam"
+        - name: signal
+          in: query
+          required: true
+          description: "Signal to attribute. Metrics carry no per-record columns, so they are not attributable."
+          schema:
+            $ref: "#/components/schemas/RecordSignal"
+        - name: tenant
+          in: query
+          required: false
+          description: "Tenant to inspect. Empty selects the instance's default tenant."
+          schema:
+            type: string
+        - name: group_by
+          in: query
+          required: false
+          description: >
+            Stream label (a resource or scope attribute name, e.g. "service.name") whose value keys
+            the report. Empty groups by raw stream id.
+          schema:
+            type: string
+        - name: columns
+          in: query
+          required: false
+          description: "Restricts the byte columns decoded and attributed. Empty accounts every byte column."
+          schema:
+            type: array
+            items:
+              type: string
+        - name: top_n
+          in: query
+          required: false
+          description: "Keeps only the N costliest groups by raw bytes. 0 returns every group."
+          schema:
+            type: integer
+            default: 20
+      responses:
+        200:
+          description: Per-group storage cost attribution.
+          content:
+            "application/json":
+              schema:
+                $ref: "#/components/schemas/StreamCosts"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/actions/{action}:
+    post:
+      operationId: "runAction"
+      summary: "Run a runtime control action"
+      description: "Execute a maintenance action against the running process."
+      parameters:
+        - $ref: "#/components/parameters/NodeParam"
+        - name: action
+          in: path
+          required: true
+          description: "Action to run."
+          schema:
+            $ref: "#/components/schemas/ActionName"
+      responses:
+        200:
+          description: Action result.
+          content:
+            "application/json":
+              schema:
+                $ref: "#/components/schemas/ActionResult"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  schemas:
+    InstanceInfo:
+      type: object
+      description: "Instance build info, uptime and per-signal configuration."
+      required:
+        - version
+        - commit
+        - go_version
+        - os
+        - arch
+        - start_time
+        - uptime_seconds
+        - storage_enabled
+        - clickhouse_enabled
+        - signals
+      properties:
+        version:
+          type: string
+          description: "Build version."
+          example: "v0.1.0"
+        commit:
+          type: string
+          description: "VCS commit hash."
+          example: "abcdef0"
+        go_version:
+          type: string
+          description: "Go toolchain version the binary was built with."
+          example: "go1.24.0"
+        os:
+          type: string
+          example: "linux"
+        arch:
+          type: string
+          example: "amd64"
+        start_time:
+          type: string
+          format: date-time
+          description: "Process start time."
+        uptime_seconds:
+          type: number
+          format: double
+          description: "Seconds since process start."
+        storage_enabled:
+          type: boolean
+          description: "Whether the embedded oteldb/storage engine is active."
+        storage_backend:
+          type: string
+          description: "Embedded storage engine backend (memory, file or s3), when enabled."
+          example: "file"
+        clickhouse_enabled:
+          type: boolean
+          description: "Whether the (deprecated) ClickHouse storage is active."
+        signals:
+          type: array
+          description: "Per-signal configuration."
+          items:
+            $ref: "#/components/schemas/SignalInfo"
+        mode:
+          $ref: "#/components/schemas/InstanceMode"
+    InstanceMode:
+      type: string
+      description: >
+        What is answering: one storage node, or a cluster aggregator standing in front of several.
+        The two serve the same API but not the same operations -- stream cost attribution and the
+        maintenance actions are per-node only, because attribution would decode each replicated part
+        once per replica and an action that half-succeeds across a cluster has no partial-failure
+        contract here. A client that cannot tell them apart can only offer those controls and let
+        them fail.
+
+        Optional rather than required so a newer aggregator can still read an older node's info
+        during a rolling upgrade; absent means the same thing as "node".
+      enum:
+        - node
+        - cluster
+      example: "node"
+    SignalInfo:
+      type: object
+      required:
+        - signal
+        - backend
+        - queryable
+      properties:
+        signal:
+          $ref: "#/components/schemas/Signal"
+        backend:
+          type: string
+          description: "Storage backend serving this signal (clickhouse, storage or none)."
+          example: "clickhouse"
+        queryable:
+          type: boolean
+          description: "Whether a query API is wired for this signal."
+        bind:
+          type: string
+          description: "Listen address of the signal's query API, when queryable."
+          example: ":3100"
+    Signal:
+      type: string
+      description: "Telemetry signal."
+      enum:
+        - metrics
+        - traces
+        - logs
+        - profiles
+        - exemplars
+    RecordSignal:
+      type: string
+      description: >
+        Signal stored as records, and so attributable per stream. Metrics are excluded: their
+        samples carry no per-record columns to attribute (use label cardinality there instead).
+      enum:
+        - traces
+        - logs
+        - profiles
+        - exemplars
+    HealthReport:
+      type: object
+      required:
+        - status
+        - components
+      properties:
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        components:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComponentHealth"
+    ComponentHealth:
+      type: object
+      required:
+        - name
+        - status
+      properties:
+        name:
+          type: string
+          description: "Component/service name."
+          example: "loki"
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        addr:
+          type: string
+          description: "Listen address, when the component is an HTTP server."
+          example: ":3100"
+        error:
+          type: string
+          description: "Last error, when unhealthy."
+    HealthStatus:
+      type: string
+      enum:
+        - healthy
+        - degraded
+        - unhealthy
+    RuntimeStats:
+      type: object
+      required:
+        - goroutines
+        - num_cpu
+        - gomaxprocs
+        - heap_alloc_bytes
+        - heap_inuse_bytes
+        - heap_sys_bytes
+        - stack_inuse_bytes
+        - gc_count
+        - next_gc_bytes
+      properties:
+        goroutines:
+          type: integer
+          format: int64
+        num_cpu:
+          type: integer
+        gomaxprocs:
+          type: integer
+        heap_alloc_bytes:
+          type: integer
+          format: int64
+          description: "Bytes of allocated heap objects (live heap)."
+        heap_inuse_bytes:
+          type: integer
+          format: int64
+        heap_sys_bytes:
+          type: integer
+          format: int64
+        stack_inuse_bytes:
+          type: integer
+          format: int64
+        gc_count:
+          type: integer
+          format: int64
+          description: "Number of completed GC cycles."
+        next_gc_bytes:
+          type: integer
+          format: int64
+          description: "Target heap size of the next GC cycle."
+        mem_limit_bytes:
+          type: integer
+          format: int64
+          description: "Soft memory limit (GOMEMLIMIT), when set."
+    StorageStats:
+      type: object
+      description: "Storage statistics for the embedded engine (primary) and ClickHouse (deprecated)."
+      required:
+        - storage_enabled
+        - clickhouse_enabled
+      properties:
+        storage_enabled:
+          type: boolean
+          description: "Whether the embedded oteldb/storage engine is active."
+        clickhouse_enabled:
+          type: boolean
+          description: "Whether the (deprecated) ClickHouse storage is active."
+        engine:
+          $ref: "#/components/schemas/EngineStats"
+        clickhouse:
+          $ref: "#/components/schemas/ClickHouseStats"
+    EngineStats:
+      type: object
+      description: "Embedded oteldb/storage engine statistics."
+      required:
+        - tenants
+        - caches
+        - maintenance
+      properties:
+        tenants:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantStats"
+        caches:
+          $ref: "#/components/schemas/CacheStats"
+        maintenance:
+          $ref: "#/components/schemas/MaintenanceStats"
+        cluster:
+          $ref: "#/components/schemas/ClusterStats"
+    MaintenanceStats:
+      type: object
+      description: >
+        Background maintenance loop liveness and recency. A growing cycle
+        duration means compaction is falling behind the ingest rate.
+      required:
+        - cycles
+        - last_cycle_duration_seconds
+        - last_cycle_tasks
+      properties:
+        cycles:
+          type: integer
+          format: int64
+          description: "Completed maintenance cycles since process start (the loop-liveness probe)."
+        last_cycle_start:
+          type: string
+          format: date-time
+          description: "Start of the most recent cycle, once one has run."
+        last_cycle_duration_seconds:
+          type: number
+          format: double
+          description: "Duration of the most recent completed cycle."
+        last_cycle_tasks:
+          type: integer
+          format: int64
+          description: "Engine tasks (flush/merge or replica refresh) dispatched in the most recent cycle."
+    TenantStats:
+      type: object
+      required:
+        - tenant
+        - total_series
+        - total_parts
+        - admission
+        - signals
+      properties:
+        tenant:
+          type: string
+          description: "Tenant identifier."
+          example: "default"
+        total_series:
+          type: integer
+          format: int64
+          description: "Sum of series across all signals."
+        total_parts:
+          type: integer
+          format: int64
+          description: "Sum of flushed parts across all signals."
+        admission:
+          $ref: "#/components/schemas/AdmissionStats"
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/EngineSignalStats"
+    EngineSignalStats:
+      type: object
+      description: "Per-signal engine statistics for a tenant."
+      required:
+        - signal
+        - series
+        - head_items
+        - head_bytes
+        - parts
+        - sealed_parts
+        - merge_running
+        - merge_backlog
+        - merge_candidates
+        - merge_cap_bytes
+        - wal
+        - wal_segments
+        - wal_bytes
+      properties:
+        signal:
+          $ref: "#/components/schemas/Signal"
+        series:
+          type: integer
+          format: int64
+          description: "Distinct series/streams (head and flushed)."
+        head_items:
+          type: integer
+          format: int64
+          description: "Unflushed samples/records in the head."
+        head_bytes:
+          type: integer
+          format: int64
+          description: "Head buffered bytes."
+        parts:
+          type: integer
+          format: int64
+          description: "Flushed immutable parts."
+        sealed_parts:
+          type: integer
+          format: int64
+          description: "Parts already at the merge cap, which no merge reconsiders."
+        min_time:
+          type: string
+          format: date-time
+        max_time:
+          type: string
+          format: date-time
+        merge_running:
+          type: boolean
+        merge_backlog:
+          type: integer
+          format: int64
+          description: "Unsealed parts a merge may still take (parts - sealed_parts)."
+        merge_candidates:
+          type: integer
+          format: int64
+          description: >
+            Parts the next merge would select. Zero with a non-zero merge_backlog is the stuck
+            state: parts remain mergeable but none qualify, which storage-compact overrides.
+        merge_cap_bytes:
+          type: integer
+          format: int64
+          description: >
+            Seal threshold in effect for a merged part. Derived per merge for metrics, so it reads
+            0 until the engine's first merge.
+        wal:
+          type: boolean
+          description: "Whether a write-ahead log is active for this signal."
+        wal_segments:
+          type: integer
+          format: int64
+        wal_bytes:
+          type: integer
+          format: int64
+          description: "Open WAL segment size."
+    AdmissionStats:
+      type: object
+      description: "Ingestion admission counters for a tenant."
+      required:
+        - accepted
+        - rejected_ooo
+        - rejected_rate
+        - rejected_cardinality
+        - rejected_in_flight
+        - sampled_dropped
+        - overflowed
+      properties:
+        accepted:
+          type: integer
+          format: int64
+        rejected_ooo:
+          type: integer
+          format: int64
+          description: "Rejected as out-of-order."
+        rejected_rate:
+          type: integer
+          format: int64
+          description: "Rejected by rate limit."
+        rejected_cardinality:
+          type: integer
+          format: int64
+          description: "Rejected by cardinality limit."
+        rejected_in_flight:
+          type: integer
+          format: int64
+          description: "Rejected due to in-flight admission pressure."
+        sampled_dropped:
+          type: integer
+          format: int64
+        overflowed:
+          type: integer
+          format: int64
+    CacheStats:
+      type: object
+      required:
+        - decode_cache
+      properties:
+        decode_cache:
+          $ref: "#/components/schemas/DecodeCacheStats"
+    DecodeCacheStats:
+      type: object
+      description: "Decoded-column cache, summed across metric engines."
+      required:
+        - hits
+        - misses
+        - bytes
+        - items
+      properties:
+        hits:
+          type: integer
+          format: int64
+        misses:
+          type: integer
+          format: int64
+        bytes:
+          type: integer
+          format: int64
+        items:
+          type: integer
+          format: int64
+          description: "Cached blocks."
+    ClusterStats:
+      type: object
+      description: "Cluster membership, present only in cluster mode."
+      required:
+        - self
+        - members
+        - owned
+      properties:
+        self:
+          type: string
+          description: "This node's ring id."
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterMember"
+        owned:
+          type: array
+          description: "Shard keys owned by this node."
+          items:
+            type: string
+        part_sync:
+          $ref: "#/components/schemas/PartSyncStats"
+        ec:
+          $ref: "#/components/schemas/ECStats"
+    PartSyncStats:
+      type: object
+      description: >
+        Cumulative shared-nothing part-mirroring activity of this node,
+        present only when the cluster runs with a private (per-node) backend.
+      required:
+        - passes
+        - mirrored
+        - copied
+        - copied_bytes
+        - pruned
+        - errors
+      properties:
+        passes:
+          type: integer
+          format: int64
+          description: "Sync attempts including no-ops (the sync-loop liveness probe)."
+        mirrored:
+          type: integer
+          format: int64
+          description: "Passes that installed a newer peer copy."
+        copied:
+          type: integer
+          format: int64
+          description: "Objects fetched from peers."
+        copied_bytes:
+          type: integer
+          format: int64
+          description: "Total size of objects fetched from peers."
+        pruned:
+          type: integer
+          format: int64
+          description: "Stale local objects deleted after the quarantine delay."
+        errors:
+          type: integer
+          format: int64
+          description: "Passes that failed part-way (retried next maintenance tick)."
+        last_sync:
+          type: string
+          format: date-time
+          description: "When the last mirroring pass completed (the replication-staleness probe)."
+    ECStats:
+      type: object
+      description: >
+        Cumulative erasure-coding activity of this node, present only when the
+        cluster runs with a private (per-node) backend. All zeros when no
+        tenant has an EC policy. A high reconstruct rate on cold reads is
+        expected; growing errors are not.
+      required:
+        - converted
+        - convert_errors
+        - repaired_slots
+        - repair_errors
+        - pruned_staged_parts
+        - reconstructs
+        - reconstruct_errors
+      properties:
+        converted:
+          type: integer
+          format: int64
+          description: "Cold parts erasure-coded by this node as their compaction owner."
+        convert_errors:
+          type: integer
+          format: int64
+          description: "Failed conversion attempts (retried on a later maintenance tick)."
+        repaired_slots:
+          type: integer
+          format: int64
+          description: "Shard slots rebuilt from surviving shards."
+        repair_errors:
+          type: integer
+          format: int64
+          description: "Failed repair attempts."
+        pruned_staged_parts:
+          type: integer
+          format: int64
+          description: "Parts whose staged foreign shards were pruned after distribution."
+        reconstructs:
+          type: integer
+          format: int64
+          description: "Read-path object reconstructions (no local full copy)."
+        reconstruct_errors:
+          type: integer
+          format: int64
+          description: "Reconstructions that failed and surfaced to the query."
+    ClusterMember:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+        zone:
+          type: string
+        addr:
+          type: string
+    ClickHouseStats:
+      type: object
+      description: "Deprecated ClickHouse storage statistics."
+      required:
+        - tables
+      properties:
+        tables:
+          type: array
+          items:
+            $ref: "#/components/schemas/TableStats"
+    TableStats:
+      type: object
+      required:
+        - database
+        - table
+        - rows
+        - bytes_on_disk
+        - data_uncompressed_bytes
+        - parts
+      properties:
+        database:
+          type: string
+          example: "default"
+        table:
+          type: string
+          example: "logs"
+        rows:
+          type: integer
+          format: int64
+        bytes_on_disk:
+          type: integer
+          format: int64
+          description: "Compressed on-disk size."
+        data_uncompressed_bytes:
+          type: integer
+          format: int64
+        parts:
+          type: integer
+          format: int64
+          description: "Number of active parts."
+        min_time:
+          type: string
+          format: date-time
+          description: "Earliest partition time, when available."
+        max_time:
+          type: string
+          format: date-time
+          description: "Latest partition time, when available."
+    EfficiencyStats:
+      type: object
+      description: "Embedded storage capacity/efficiency breakdown."
+      required:
+        - storage_enabled
+        - tenants
+      properties:
+        storage_enabled:
+          type: boolean
+          description: "Whether the embedded oteldb/storage engine is active."
+        tenants:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantEfficiency"
+    TenantEfficiency:
+      type: object
+      description: "One tenant's per-signal efficiency breakdown."
+      required:
+        - tenant
+        - signals
+      properties:
+        tenant:
+          type: string
+          description: "Tenant identifier."
+          example: "default"
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/SignalEfficiency"
+    SignalEfficiency:
+      type: object
+      description: >
+        One (tenant, signal)'s flushed-data shape: how many points it stores,
+        in how many bytes, and how well they compress. Stored bytes are this
+        node's on-disk footprint — under erasure coding with slot filtering
+        that is the local shard, not the cluster-wide total.
+      required:
+        - signal
+        - series
+        - parts
+        - points
+        - stored_bytes
+        - bytes_per_point
+      properties:
+        signal:
+          $ref: "#/components/schemas/Signal"
+        series:
+          type: integer
+          format: int64
+          description: "Distinct series/streams (head and flushed)."
+        parts:
+          type: integer
+          format: int64
+          description: "Flushed part count."
+        points:
+          type: integer
+          format: int64
+          description: "Total samples (metrics) or records (logs/traces/profiles)."
+        stored_bytes:
+          type: integer
+          format: int64
+          description: "Sum of the parts' backend object sizes on this node."
+        bytes_per_point:
+          type: number
+          format: double
+          description: "Stored bytes per point — the per-sample storage cost."
+        logical_bytes:
+          type: integer
+          format: int64
+          description: >
+            Uncompressed logical size of the stored points; present only for
+            metrics (points x 16), the record signals' per-record logical size
+            is not recorded.
+        compression_ratio:
+          type: number
+          format: double
+          description: "Logical/stored ratio (e.g. 8.0 = stored at 1/8th of logical); present only when logical size is known."
+        parts_detail:
+          type: array
+          description: >
+            The individual parts behind the counters above, present only when the request asked
+            for them. Absent and empty are indistinguishable in JSON, so read this together with
+            `parts`: a signal with parts > 0 and no `parts_detail` was not asked for detail.
+          items:
+            $ref: "#/components/schemas/PartEfficiency"
+    PartEfficiency:
+      type: object
+      description: "One flushed part's identity and size."
+      required:
+        - id
+        - bytes
+        - rows
+        - series
+      properties:
+        id:
+          type: string
+          description: >
+            The part's backend key prefix. It is assigned once by the node that wrote the part and
+            is preserved verbatim when the part is mirrored, so the same id on two nodes is the
+            same data — which is what makes cluster-wide deduplication possible.
+          example: "default/metrics/01M00000000000000000000007"
+        bytes:
+          type: integer
+          format: int64
+          description: "Sum of the part's backend object sizes on this node."
+        rows:
+          type: integer
+          format: int64
+          description: "Samples (metrics) or records (logs/traces/profiles) in the part."
+        series:
+          type: integer
+          format: int64
+          description: "Distinct series/streams in the part."
+        columns:
+          type: array
+          description: >
+            The part's columns, each with its physical layout and the size of its object. Present
+            only when the part was read in enough detail to know them; a column whose values all
+            collapsed to a constant has no object and so reports 0 bytes. Together with
+            `other_bytes` the column sizes sum to `bytes`, which is what makes a single column's
+            share of a store — the metric timestamp column's, say — measurable from the API.
+          items:
+            $ref: "#/components/schemas/PartColumn"
+        other_bytes:
+          type: object
+          description: >
+            Every non-column object in the part, keyed by its name under the part prefix
+            (`manifest`, `marks`, and the engine's own indexes, e.g. `identity`, `sidx`, `stats`,
+            `blooms`). With the `columns` sizes it sums to `bytes`.
+          additionalProperties:
+            type: integer
+            format: int64
+          example:
+            manifest: 412
+            marks: 2048
+    PartColumn:
+      type: object
+      description: "One part column's physical description and the size it takes on the backend."
+      required:
+        - name
+        - kind
+        - codec
+        - compress
+        - bytes
+      properties:
+        name:
+          type: string
+          description: "Column name."
+          example: "timestamp"
+        kind:
+          type: string
+          description: "Physical type of the column's values."
+          example: "int64"
+        codec:
+          type: string
+          description: "Value codec the column is encoded with."
+          example: "delta"
+        compress:
+          type: string
+          description: "Block-compression algorithm applied on top of the codec."
+          example: "zstd"
+        level:
+          type: integer
+          description: >
+            Block-compression level the column was written at; 0 means the algorithm default or an
+            uncompressed column. Merged metric parts climb a size-graduated ladder, so it varies
+            from part to part.
+        bytes:
+          type: integer
+          format: int64
+          description: "Size of the column's object; 0 for a constant-collapsed column, which has none."
+    ClusterStorage:
+      type: object
+      description: >
+        The cluster's storage footprint, counted both ways: once per stored copy and once per
+        distinct part.
+      required:
+        - replication_factor
+        - complete
+        - nodes
+        - tenants
+      properties:
+        replication_factor:
+          type: integer
+          description: "The cluster's configured replication factor, as this aggregator is configured."
+        complete:
+          type: boolean
+          description: >
+            Whether every member answered, and answered with the part identities deduplication
+            needs. False makes every logical figure below a LOWER BOUND: a node that did not
+            answer contributes no parts to the union, so a part only it holds is missing from the
+            count entirely. See `nodes` for which node failed.
+        nodes:
+          type: array
+          description: "Every member the aggregator asked, answering or not."
+          items:
+            $ref: "#/components/schemas/ClusterNodeStatus"
+        tenants:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterTenantStorage"
+    ClusterNodes:
+      type: object
+      description: "The cluster's current ring membership."
+      required:
+        - nodes
+      properties:
+        nodes:
+          type: array
+          description: "Every member the aggregator knows, answering or not."
+          items:
+            $ref: "#/components/schemas/ClusterNodeStatus"
+    ClusterNodeStatus:
+      type: object
+      description: "One member node's participation in this report."
+      required:
+        - node
+        - status
+      properties:
+        node:
+          type: string
+          description: "Member id in the ring."
+          example: "oteldb-1"
+        addr:
+          type: string
+          description: "Admin API base URL the aggregator used."
+        status:
+          $ref: "#/components/schemas/ClusterNodeState"
+        error:
+          type: string
+          description: "Why the node did not answer. Present only when status is unreachable."
+        duration_seconds:
+          type: number
+          format: double
+          description: "How long the node took to answer."
+    ClusterNodeState:
+      type: string
+      description: "Whether a member answered the aggregator."
+      enum:
+        - ok
+        - unreachable
+    ClusterTenantStorage:
+      type: object
+      description: "One tenant's cluster-wide footprint."
+      required:
+        - tenant
+        - signals
+      properties:
+        tenant:
+          type: string
+          example: "default"
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterSignalStorage"
+    ClusterSignalStorage:
+      type: object
+      description: >
+        One (tenant, signal)'s footprint across the cluster. The logical figures deduplicate by
+        part id; the physical ones do not, and their ratio is the replication actually achieved —
+        which is not the configured factor while a rebalance is in flight or a replica is missing.
+      required:
+        - signal
+        - logical_bytes
+        - physical_bytes
+        - logical_parts
+        - physical_parts
+        - logical_points
+        - physical_points
+        - replication_factor
+        - nodes
+      properties:
+        signal:
+          $ref: "#/components/schemas/Signal"
+        logical_bytes:
+          type: integer
+          format: int64
+          description: >
+            Stored bytes of the distinct parts the cluster holds — a part mirrored to several
+            owners is counted once, at the size the first node reporting it gave. This is the
+            number to plan capacity against. It is a LOWER BOUND when `complete` is false: parts
+            held only by a node that did not answer are missing from the union entirely.
+        physical_bytes:
+          type: integer
+          format: int64
+          description: >
+            Sum of every answering node's stored bytes, counting a part once per replica. This is
+            what the disks actually hold, and it is deliberately not `logical_bytes` times the
+            replication factor: under-replication and in-flight rebalancing move the two apart,
+            which is exactly when the difference is worth looking at.
+        logical_parts:
+          type: integer
+          format: int64
+          description: "Distinct part ids across the answering nodes."
+        physical_parts:
+          type: integer
+          format: int64
+          description: "Sum of the answering nodes' part counts — one count per stored replica."
+        logical_points:
+          type: integer
+          format: int64
+          description: >
+            Samples or records in the distinct parts, deduplicated the same way as
+            `logical_bytes` and an underestimate under the same condition.
+        physical_points:
+          type: integer
+          format: int64
+          description: "Sum of the answering nodes' point counts, counting a replicated part once per replica."
+        replication_factor:
+          type: integer
+          description: "The cluster's configured replication factor, repeated here so the two byte figures read on their own."
+        nodes:
+          type: array
+          description: >
+            What each node contributed, ordered by node id. Only nodes holding data for this
+            (tenant, signal) appear: a node that holds none of it and a node that did not answer
+            are both absent here, and the report's `nodes` is what tells them apart.
+          items:
+            $ref: "#/components/schemas/ClusterNodeSignalStorage"
+    ClusterNodeSignalStorage:
+      type: object
+      description: "One node's share of a (tenant, signal)."
+      required:
+        - node
+        - bytes
+        - parts
+        - points
+      properties:
+        node:
+          type: string
+          example: "oteldb-1"
+        bytes:
+          type: integer
+          format: int64
+          description: "Stored bytes on this node."
+        parts:
+          type: integer
+          format: int64
+          description: "Parts on this node."
+        points:
+          type: integer
+          format: int64
+          description: "Samples or records on this node."
+    StreamCosts:
+      type: object
+      description: "Per-stream (or per-label-value) storage cost attribution for one signal."
+      required:
+        - storage_enabled
+        - signal
+        - tenant
+        - groups
+      properties:
+        storage_enabled:
+          type: boolean
+          description: "False when no embedded engine is active, in which case groups is empty."
+        signal:
+          $ref: "#/components/schemas/RecordSignal"
+        tenant:
+          type: string
+        group_by:
+          type: string
+          description: "Label whose values key the report. Empty means the report is keyed by stream id."
+        groups:
+          type: array
+          description: "Costliest groups first. Empty when the tenant has no engine for the signal."
+          items:
+            $ref: "#/components/schemas/StreamCost"
+    StreamCost:
+      type: object
+      description: "One group's share of a signal's storage."
+      required:
+        - key
+        - streams
+        - rows
+        - raw_bytes
+        - disk_bytes
+        - distinct_estimated
+        - columns
+      properties:
+        key:
+          type: string
+          description: "The group_by label's value, or the stream id. Empty means the label is absent."
+        streams:
+          type: integer
+          format: int64
+          description: "Distinct streams folded into this group."
+        rows:
+          type: integer
+          format: int64
+        raw_bytes:
+          type: integer
+          format: int64
+          description: "Decoded footprint of the group's rows over the accounted columns."
+        disk_bytes:
+          type: integer
+          format: int64
+          description: >
+            Approximate compressed share. Compression is per column per frame and a frame spans
+            whatever streams its rows fall in, so each frame's size is apportioned across the
+            groups holding its rows by their raw-byte share.
+        distinct_estimated:
+          type: boolean
+          description: >
+            Whether per-column distinct counts were measured for this group. False means they are
+            0 because the group fell outside the sketch budget, not because the values are unique.
+        columns:
+          type: array
+          items:
+            $ref: "#/components/schemas/ColumnCost"
+    ColumnCost:
+      type: object
+      description: "One column's share of a stream cost."
+      required:
+        - name
+        - raw_bytes
+        - disk_bytes
+        - distinct
+        - distinct_normalized
+      properties:
+        name:
+          type: string
+        raw_bytes:
+          type: integer
+          format: int64
+        disk_bytes:
+          type: integer
+          format: int64
+          description: "Approximate, apportioned as StreamCost.disk_bytes."
+        distinct:
+          type: integer
+          format: int64
+          description: >
+            Estimated distinct values in this column (HyperLogLog, ~1.6% standard error). 0 for an
+            int column and for a group outside the sketch budget.
+        distinct_normalized:
+          type: integer
+          format: int64
+          description: >
+            Distinct over values with every run of ASCII digits collapsed to '#'. A large distinct
+            with a tiny distinct_normalized means the source is emitting one templated line with an
+            embedded timestamp or id instead of structured fields — a fixable diagnosis.
+    ActionName:
+      type: string
+      description: "Supported runtime control actions."
+      enum:
+        - gc
+        - free-os-memory
+        - storage-maintain
+        - storage-compact
+    ActionResult:
+      type: object
+      required:
+        - action
+        - ok
+        - message
+      properties:
+        action:
+          $ref: "#/components/schemas/ActionName"
+        ok:
+          type: boolean
+        message:
+          type: string
+          description: "Human-readable outcome."
+          example: "GC completed"
+        freed_bytes:
+          type: integer
+          format: int64
+          description: "Heap bytes released, for memory-reclaiming actions."
+    TraceID:
+      type: string
+      description: W3C trace-id
+      pattern: "[[:xdigit:]]{32}"
+      example: 0af7651916cd43dd8448eb211c80319c
+    SpanID:
+      type: string
+      description: W3C parent-id (span)
+      pattern: "[[:xdigit:]]{16}"
+      example: b7ad6b7169203331
+    Error:
+      title: Structured error
+      description: Error occurred while processing request
+      type: object
+      required:
+        - error_message
+      properties:
+        error_message:
+          type: string
+          description: "Human-readable error message"
+          example: "Something went wrong"
+        trace_id:
+          $ref: "#/components/schemas/TraceID"
+        span_id:
+          $ref: "#/components/schemas/SpanID"
+  parameters:
+    NodeParam:
+      name: node
+      in: query
+      required: false
+      description: >
+        Addresses one member node by its ring id instead of the whole cluster. A cluster-wide
+        admin forwards the request to that member and returns its answer verbatim; unset, it
+        aggregates every member as usual. Names come from /api/v1/cluster/nodes.
+
+        This is what makes the per-node-only operations reachable from the cluster panel: stream
+        cost attribution and the maintenance actions are refused cluster-wide, but are ordinary
+        requests once addressed to a node. A storage node ignores the parameter -- it is the only
+        node it can answer for.
+      schema:
+        type: string
+      example: "oteldb-1"
+  responses:
+    Error:
+      description: Structured error response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

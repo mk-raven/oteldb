@@ -1,0 +1,160 @@
+{{- $dataDir := include "oteldb.dataDir" . }}
+{{- if and (eq (default "memory" .Values.config.storage.backend) "file") (not $dataDir) }}
+{{- fail "config.storage.dir is required for the file backend" }}
+{{- end }}
+{{- $persistent := and .Values.persistence.enabled $dataDir }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "oteldb.fullname" . }}
+  labels:
+    {{- include "oteldb.labels" . | nindent 4 }}
+spec:
+  # Single node only: the embedded storage engine here is not clustered. Clustered,
+  # multi-replica oteldb is deployed by the operator (github.com/oteldb/operator).
+  replicas: 1
+  serviceName: {{ include "oteldb.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "oteldb.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "oteldb.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "oteldb.serviceAccountName" . }}
+      # Flushing the head and the WAL on shutdown scales with the data directory.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "oteldb.fullname" . }}-cfg
+        {{- if not $persistent }}
+        {{- if $dataDir }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- else if .Values.persistence.existingClaim }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+        {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: health-check
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: health-check
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          # Replaying the WAL of a large data directory can take minutes; give startup its
+          # own budget instead of the (much tighter) liveness one.
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: health-check
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          volumeMounts:
+            - mountPath: /etc/otel/
+              name: config
+            {{- if $dataDir }}
+            - mountPath: {{ $dataDir }}
+              name: data
+            {{- end }}
+          args:
+            - --config=/etc/otel/config.yml
+          {{- with .Values.envFrom }}
+          envFrom: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "oteldb.env" . | nindent 12 }}
+          ports:
+            - containerPort: 19291
+              protocol: TCP
+              name: prom-rw
+            - containerPort: 3200
+              protocol: TCP
+              name: tempo-http
+            - containerPort: 9090
+              protocol: TCP
+              name: prom-http
+            - containerPort: 3100
+              protocol: TCP
+              name: loki-http
+            - containerPort: 4040
+              protocol: TCP
+              name: pyroscope
+            - containerPort: 4317
+              protocol: TCP
+              name: otlp-grpc
+            - containerPort: 4318
+              protocol: TCP
+              name: otlp-http
+            - containerPort: 8090
+              protocol: TCP
+              name: admin
+            {{- if include "oteldb.metricsEnabled" . }}
+            - containerPort: {{ .Values.telemetry.metrics.port }}
+              protocol: TCP
+              name: metrics
+            {{- end }}
+            - containerPort: 13133
+              protocol: TCP
+              name: health-check
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and $persistent (not .Values.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "oteldb.labels" . | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
+        {{- if .Values.persistence.storageClass }}
+        {{- if (eq "-" .Values.persistence.storageClass) }}
+        storageClassName: ""
+        {{- else }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        {{- end }}
+  {{- end }}

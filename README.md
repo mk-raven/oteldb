@@ -2,7 +2,7 @@
 <img height="256" src="logo.svg" alt="oteldb svg logo">
 </p>
 
-# oteldb [![codecov](https://img.shields.io/codecov/c/github/go-faster/oteldb?label=cover)](https://codecov.io/gh/go-faster/oteldb) [![experimental](https://img.shields.io/badge/-experimental-blueviolet)](https://go-faster.org/docs/projects/status#experimental)
+# oteldb [![codecov](https://img.shields.io/codecov/c/github/oteldb/oteldb?label=cover)](https://codecov.io/gh/oteldb/oteldb) [![experimental](https://img.shields.io/badge/-experimental-blueviolet)](https://go-faster.org/docs/projects/status#experimental)
 
 The next generation, [OpenTelemetry-first][otel] aggregation system for metrics, traces and logs.
 
@@ -12,9 +12,6 @@ Based on [ClickHouse][clickhouse], fastest open-source (Apache 2.0) column-orien
 
 [clickhouse]: https://clickhouse.com/
 [otel]: https://opentelemetry.io/
-
-> [!WARNING]
-> Work in progress. Not ready for production use.
 
 Supported query languages:
 - [PromQL][promql] ([Prometheus][prometheus]) for metrics, [>99% compatibility][compliance]
@@ -62,11 +59,90 @@ Setup oteldb, ClickHouse, Grafana, and telemetry generators:
 docker compose -f dev/local/ch/docker-compose.yml up -d
 ```
 
-
-
-
-
 You can open Grafana dashboard at http://localhost:3000/d/oteldb/oteldb
+
+## Embedded storage
+
+oteldb can also run on the embedded [storage engine][storage] instead of ClickHouse. The engine is
+in-process and requires no external dependencies, which makes it convenient for local development,
+testing, and small single-node deployments. It serves all signals: metrics (PromQL), traces
+(TraceQL), logs (LogQL) and profiles (Pyroscope). PromQL on the embedded engine passes the full
+[ch-compliance][compliance] suite (537/537, 100%).
+
+[storage]: https://github.com/oteldb/storage
+
+Enable it for every signal with a single flag:
+
+```shell
+oteldb --embedded
+```
+
+This runs oteldb as a fully self-contained binary: ClickHouse is not started at all (not even the
+zero-config embedded ClickHouse) and no DSN is required. It is shorthand for setting each signal's
+backend to `storage` in the config. You can also enable
+it per signal, and switch the engine from the default ephemeral in-memory store to an on-disk one:
+
+```yaml
+# oteldb.yml
+metrics_backend: storage
+traces_backend: storage
+logs_backend: storage
+profiles_backend: storage
+
+storage:
+  backend: file       # "memory" (default, ephemeral) or "file"
+  dir: ./oteldb-data  # base data directory: parts in <dir>/parts, write-ahead log in <dir>/wal
+  # wal_dir: ...      # overrides the WAL location; keep it on the same volume as dir
+  flush_interval: 1m  # max age of unflushed head data before it is flushed to a part
+```
+
+The WAL holds what the parts do not have yet, so keep it on the same volume as `dir` (the
+default): the two are only consistent when kept, snapshotted and restored together. `wal_dir` must
+not be inside `<dir>/parts`.
+
+A data directory written before the `parts` subdirectory existed is refused at startup. To migrate
+it, stop the node, then run `mkdir <dir>/parts` and move every top-level entry of `<dir>` except
+`wal` into `<dir>/parts/`.
+
+Any signal left unset (or set to `clickhouse`) keeps using ClickHouse, so the two backends can be
+mixed. Profiles have no ClickHouse implementation and are served only when `profiles_backend` is
+`storage`.
+
+## Profiling oteldb itself
+
+Both are off by default, need no code or config-file changes, and are driven entirely by the
+environment (`go-faster/sdk` wires them from `app.Run`).
+
+**Continuous profiling** ships CPU, heap, goroutine, mutex and block profiles to any
+Pyroscope-compatible endpoint — including another oteldb, since oteldb serves the Pyroscope ingest
+API itself. Enabling it also links traces to profiles, so a span can be opened straight into the
+profile recorded while it ran:
+
+```shell
+PYROSCOPE_ENABLE=true                  # required; anything strconv.ParseBool accepts
+PYROSCOPE_URL=http://oteldb-svc:4040   # ingest endpoint
+PYROSCOPE_APP_NAME=oteldb              # application name the profiles appear under
+PYROSCOPE_USER=...                     # optional basic auth
+PYROSCOPE_PASSWORD=...                 # optional basic auth
+PYROSCOPE_TENANT_ID=...                # optional multi-tenant header
+```
+
+Mutex and block profiling are sampled by the Go runtime rather than collected on demand; enabling
+Pyroscope switches both on (`SetMutexProfileFraction(5)`, `SetBlockProfileRate(5)`), which costs a
+little throughput on contended locks.
+
+This is what catches a slow leak: `inuse_space` growing across hours is invisible to a profile
+taken by hand, because by the time anyone looks at the memory graph the process is minutes from an
+OOM kill.
+
+**On-demand pprof** exposes the standard `/debug/pprof/` handlers on their own listener:
+
+```shell
+PPROF_ADDR=:6060
+```
+
+Note that the two can interfere: while the Pyroscope client is collecting, an overlapping CPU
+profile fetched from `/debug/pprof/profile` may fail.
 
 ## License
 

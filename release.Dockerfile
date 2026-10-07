@@ -1,9 +1,13 @@
-ARG IMG=clickhouse/clickhouse-server:latest
-FROM $IMG
+ARG BASE_IMAGE=gcr.io/distroless/static
+FROM ${BASE_IMAGE}
 
-COPY oteldb /usr/bin/local/oteldb
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/oteldb     /usr/local/bin/oteldb
+COPY $TARGETPLATFORM/odbbackup  /usr/local/bin/odbbackup
+COPY $TARGETPLATFORM/odbrestore /usr/local/bin/odbrestore
+COPY $TARGETPLATFORM/odbmigrate /usr/local/bin/odbmigrate
+COPY $TARGETPLATFORM/odbingest  /usr/local/bin/odbingest
+COPY $TARGETPLATFORM/odbselect  /usr/local/bin/odbselect
+COPY $TARGETPLATFORM/odbadmin   /usr/local/bin/odbadmin
 
-VOLUME /clickhouse
-ENV EMBEDDED_CLICKHOUSE_HOST=0.0.0.0
-
-ENTRYPOINT ["/usr/bin/local/oteldb"]
+ENTRYPOINT ["/usr/local/bin/oteldb"]

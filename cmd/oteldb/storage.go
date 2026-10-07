@@ -2,69 +2,91 @@ package main
 
 import (
 	"context"
-	"time"
+	"os"
+	"strings"
 
 	"github.com/go-faster/errors"
 	"github.com/go-faster/sdk/app"
-	"github.com/prometheus/prometheus/storage"
+	"github.com/go-faster/sdk/zctx"
 	"go.uber.org/zap"
 
-	"github.com/go-faster/oteldb/internal/chstorage"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine"
-	"github.com/go-faster/oteldb/internal/logstorage"
-	"github.com/go-faster/oteldb/internal/traceql/traceqlengine"
-	"github.com/go-faster/oteldb/internal/tracestorage"
+	"github.com/oteldb/oteldb/internal/chstorage"
+	"github.com/oteldb/oteldb/internal/globalmetric"
+	"github.com/oteldb/oteldb/internal/profilestorage"
+	"github.com/oteldb/oteldb/internal/queryapi"
 )
 
 type otelStorage struct {
 	logQuerier     logQuerier
 	traceQuerier   traceQuerier
 	metricsQuerier metricQuerier
+	// profileQuerier serves the Pyroscope API. It is nil until a profiles
+	// storage backend is wired in (deferred to oteldb/storage), in which case
+	// the Pyroscope API is not registered.
+	profileQuerier profilestorage.Querier
+
+	// chClient is the ClickHouse client backing the ClickHouse-served signals. It is nil when no
+	// signal is served from ClickHouse (e.g. under --embedded). Used by the admin API for storage
+	// statistics and a liveness probe.
+	chClient chstorage.ClickHouseClient
 }
 
-type logQuerier interface {
-	logstorage.Querier
-	logqlengine.Querier
-}
-
-type traceQuerier interface {
-	tracestorage.Querier
-	traceqlengine.Querier
-}
-
-type metricQuerier interface {
-	storage.Queryable
-	storage.ExemplarQueryable
-}
+// Queriers backing the query APIs.
+type (
+	logQuerier    = queryapi.LogQuerier
+	traceQuerier  = queryapi.TraceQuerier
+	metricQuerier = queryapi.MetricQuerier
+)
 
 func setupCH(
 	ctx context.Context,
 	dsn string,
-	ttl time.Duration,
+	cfg Config,
 	lg *zap.Logger,
 	m *app.Telemetry,
 ) (store otelStorage, _ error) {
 	c, err := chstorage.Dial(ctx, dsn, chstorage.DialOptions{
 		MeterProvider:  m.MeterProvider(),
 		TracerProvider: m.TracerProvider(),
-		Logger:         lg,
+		Logger:         lg.WithOptions(zap.IncreaseLevel(cfg.CHLogLevel)),
 	})
 	if err != nil {
 		return store, errors.Wrap(err, "dial clickhouse")
 	}
 
-	// FIXME(tdakkota): this is not a good place for migration
 	tables := chstorage.DefaultTables()
-	tables.TTL = ttl
-
-	if err := tables.Create(ctx, c); err != nil {
-		return store, errors.Wrap(err, "create tables")
+	if err := migrate(ctx, c, tables, cfg); err != nil {
+		return store, errors.Wrap(err, "migrate schema")
 	}
 
+	tracker, err := globalmetric.NewTracker(m.MeterProvider(), m.TracerProvider())
+	if err != nil {
+		return store, errors.Wrap(err, "create global metric tracker")
+	}
+	globalmetric.SetTracker(tracker)
+
 	querier, err := chstorage.NewQuerier(c, chstorage.QuerierOptions{
-		Tables:         tables,
-		MeterProvider:  m.MeterProvider(),
-		TracerProvider: m.TracerProvider(),
+		Tables:     tables,
+		CHLogLevel: cfg.CHLogLevel,
+
+		MaxResultRows:    cfg.MaxResultRows,
+		MaxResultBytes:   int(cfg.MaxResultBytes),
+		MaxExecutionTime: cfg.MaxExecutionTime,
+
+		DisableRateOffloading:   cfg.Prometheus.DisableRateOffloading,
+		DisableMetricOffloading: cfg.Prometheus.DisableMetricOffloading,
+
+		MetricsCacheOptions: chstorage.MetricsCacheOptions{
+			MaxBytes:  int64(cfg.Prometheus.Cache.MaxBytes),
+			SafetyLag: cfg.Prometheus.Cache.SafetyLag,
+		},
+		MeterProvider:     m.MeterProvider(),
+		TracerProvider:    m.TracerProvider(),
+		Tracker:           tracker,
+		MetricSeriesLimit: cfg.Prometheus.MaxTimeseries,
+
+		MaxSampleRows:        cfg.Loki.MaxSampleRows,
+		MaxSampleResultBytes: int(cfg.Loki.MaxSampleResultBytes),
 	})
 	if err != nil {
 		return store, errors.Wrap(err, "create querier")
@@ -74,5 +96,57 @@ func setupCH(
 		logQuerier:     querier,
 		traceQuerier:   querier,
 		metricsQuerier: querier,
+		chClient:       c,
 	}, nil
+}
+
+func migrate(ctx context.Context, client chstorage.ClickHouseClient, tables chstorage.Tables, cfg Config) error {
+	lg := zctx.From(ctx).Named("migrator").WithOptions(zap.IncreaseLevel(cfg.CHLogLevel))
+	ctx = zctx.Base(ctx, lg)
+
+	migratorCfg := chstorage.MigratorOptions{
+		Tables:     tables,
+		Cluster:    cfg.Cluster,
+		Replicated: cfg.Replicated,
+		TTL:        cfg.TTL,
+	}
+	if migratorCfg.Replicated && migratorCfg.Cluster == "" {
+		migratorCfg.Cluster = "{cluster}"
+		lg.Warn("Using default macro for cluster name", zap.String("cluster", migratorCfg.Cluster))
+	}
+
+	migrator := chstorage.NewMigrator(client, migratorCfg)
+	switch mode := os.Getenv("OTELDB_MIGRATION_MODE"); strings.ToLower(mode) {
+	case "none":
+		// Do not perform any schema migration at all.
+		lg.Info("Migration is disabled, validating existing schema")
+		if err := migrator.Validate(ctx); err != nil {
+			return errors.Wrap(err, "validate existing schema")
+		}
+		lg.Info("Existing schema is compatible")
+		return nil
+	case "", "auto":
+		lg.Info("Performing automatic migration if needed")
+		// Best effort to migrate schema, but do fail if there is existing database with incompatible schema.
+		if err := migrator.Create(ctx); err != nil {
+			return errors.Wrap(err, "perform a migration")
+		}
+		lg.Info("Migration completed")
+		return nil
+	case "test", "debug":
+		// In test and debug modes, we want to recreate tables on each run to ensure that schema is up to date.
+		lg.Info("Recreating tables for test/debug mode")
+		if err := migrator.DropIfExists(ctx, func(database, table string) {
+			lg.Warn("DROPPING table", zap.String("database", database), zap.String("table", table))
+		}); err != nil {
+			return errors.Wrap(err, "drop existing schema")
+		}
+		if err := migrator.Create(ctx); err != nil {
+			return errors.Wrap(err, "create schema")
+		}
+		lg.Info("Migration completed")
+		return nil
+	default:
+		return errors.Errorf("unknown migration mode %q", mode)
+	}
 }

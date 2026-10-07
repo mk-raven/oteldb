@@ -1,0 +1,14 @@
+# Host-built oteldb + otelbench binaries (built on the host because the oteldb repo's go.mod
+# replace directives point at local /src/oteldb/{storage,promql-engine}, which only resolve here;
+# the Dockerfile COPYs ./oteldb in).
+/oteldb
+/otelbench
+
+# Benchmark outputs (per-backend report-<name>.yml, plus the rendered markdown).
+/report.yml
+/report-*.yml
+/report.txt
+/REPORT.md
+
+# Generated vmagent scrape config (regenerated each run from -nodes).
+/vmagent-scrape.yml

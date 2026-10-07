@@ -11,7 +11,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/xspan"
 )
 
 // Engine is a LogQL evaluation engine.
@@ -105,17 +106,29 @@ func (e *Engine) NewQuery(ctx context.Context, query string) (q Query, rerr erro
 		attribute.String("logql.query", query),
 	))
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	expr, err := logql.Parse(query, e.parseOpts)
 	if err != nil {
 		return nil, errors.Wrap(err, "parse")
 	}
+	return e.newQuery(ctx, expr)
+}
 
+// NewQueryFromExpr creates new [Query] from parsed [logql.Expr].
+func (e *Engine) NewQueryFromExpr(ctx context.Context, expr logql.Expr) (q Query, rerr error) {
+	ctx, span := e.tracer.Start(ctx, "logql.Engine.NewQuery", trace.WithAttributes(
+		// TODO(tdakkota): make LogQL printer.
+		attribute.String("logql.query", "<query>"),
+	))
+	defer func() {
+		xspan.End(span, rerr)
+	}()
+	return e.newQuery(ctx, expr)
+}
+
+func (e *Engine) newQuery(ctx context.Context, expr logql.Expr) (q Query, _ error) {
 	if _, explain := expr.(*logql.ExplainExpr); explain {
 		logs := new(explainLogs)
 		ctx = buildExplainQuery(ctx, logs)
@@ -128,6 +141,7 @@ func (e *Engine) NewQuery(ctx context.Context, query string) (q Query, rerr erro
 		}()
 	}
 
+	var err error
 	q, err = e.buildQuery(ctx, expr)
 	if err != nil {
 		return nil, err

@@ -14,15 +14,20 @@ import (
 // SelectQuery is a SELECT query builder.
 type SelectQuery struct {
 	table    string
+	alias    string
 	sub      *SelectQuery
 	distinct bool
+	final    bool
+	with     []WithColumn
 	columns  []ResultColumn
 
+	join []joinExpr
 	// prewhere is a set of expression joined by AND
 	prewhere []Expr
 	// where is a set of expression joined by AND
 	where   []Expr
 	groupBy []Expr
+	having  []Expr
 	order   []orderExpr
 
 	limit int
@@ -51,9 +56,38 @@ func SelectFrom(sub *SelectQuery, columns ...ResultColumn) *SelectQuery {
 	}
 }
 
+// With adds common table expressions to a query.
+func (q *SelectQuery) With(name string, expr Expr) *SelectQuery {
+	q.with = append(q.with, WithColumn{Name: name, Expr: expr})
+	return q
+}
+
 // Distinct sets if query is `DISTINCT`.
 func (q *SelectQuery) Distinct(b bool) *SelectQuery {
 	q.distinct = b
+	return q
+}
+
+// Final sets if query is `FINAL`.
+func (q *SelectQuery) Final(b bool) *SelectQuery {
+	q.final = b
+	return q
+}
+
+// Alias sets alias for selected table.
+func (q *SelectQuery) Alias(alias string) *SelectQuery {
+	q.alias = alias
+	return q
+}
+
+// InnerJoin adds an INNER JOIN to query.
+func (q *SelectQuery) InnerJoin(table, alias string, on Expr) *SelectQuery {
+	q.join = append(q.join, joinExpr{
+		typ:   innerJoin,
+		table: table,
+		alias: alias,
+		on:    on,
+	})
 	return q
 }
 
@@ -72,6 +106,12 @@ func (q *SelectQuery) Where(filters ...Expr) *SelectQuery {
 // GroupBy adds grouping to query.
 func (q *SelectQuery) GroupBy(groups ...Expr) *SelectQuery {
 	q.groupBy = append(q.groupBy, groups...)
+	return q
+}
+
+// Having adds grouped filters to query.
+func (q *SelectQuery) Having(filters ...Expr) *SelectQuery {
+	q.having = append(q.having, filters...)
 	return q
 }
 
@@ -122,6 +162,26 @@ func (q *SelectQuery) Results() (r proto.Results) {
 
 // WriteSQL writes SQL query.
 func (q *SelectQuery) WriteSQL(p *Printer) error {
+	if len(q.with) > 0 {
+		p.With()
+		for i, c := range q.with {
+			if i != 0 {
+				p.Comma()
+			}
+
+			cexpr := c.Expr
+			if cexpr.IsZero() {
+				// If expression is not defined, assume that column
+				// name is expected.
+				cexpr = Ident(c.Name)
+			}
+			cexpr = aliasColumn(c.Name, cexpr)
+
+			if err := p.WriteExpr(cexpr); err != nil {
+				return errors.Wrapf(err, "with %q", c.Name)
+			}
+		}
+	}
 	p.Select()
 	if q.distinct {
 		p.Distinct()
@@ -151,6 +211,9 @@ func (q *SelectQuery) WriteSQL(p *Printer) error {
 	switch {
 	case q.table != "":
 		p.Ident(q.table)
+		if q.final {
+			p.Final()
+		}
 	case q.sub != nil:
 		p.OpenParen()
 		if err := q.sub.WriteSQL(p); err != nil {
@@ -159,6 +222,40 @@ func (q *SelectQuery) WriteSQL(p *Printer) error {
 		p.CloseParen()
 	default:
 		return errors.New("either table or sub-query must be present")
+	}
+	if q.alias != "" {
+		p.Ident(q.alias)
+	}
+	for i, j := range q.join {
+		switch j.typ {
+		case innerJoin:
+			p.Inner()
+		case leftOuterJoin:
+			p.Left()
+			p.Outer()
+		case rightOuterJoin:
+			p.Right()
+			p.Outer()
+		case fullOuterJoin:
+			p.Full()
+			p.Outer()
+		case crossJoin:
+			p.Cross()
+		default:
+			return errors.Errorf("unknown join type %v", j.typ)
+		}
+		p.Join()
+
+		p.Ident(j.table)
+		if j.alias != "" {
+			p.Ident(j.alias)
+		}
+		if !j.on.IsZero() {
+			p.On()
+			if err := p.WriteExpr(j.on); err != nil {
+				return errors.Wrapf(err, "join[%d] %q", i, j.table)
+			}
+		}
 	}
 	if len(q.prewhere) > 0 {
 		p.Prewhere()
@@ -192,6 +289,18 @@ func (q *SelectQuery) WriteSQL(p *Printer) error {
 			}
 			if err := p.WriteExpr(e); err != nil {
 				return errors.Wrapf(err, "group by %d", i)
+			}
+		}
+	}
+	if len(q.having) > 0 {
+		p.Having()
+
+		for i, e := range q.having {
+			if i != 0 {
+				p.And()
+			}
+			if err := p.WriteExpr(e); err != nil {
+				return errors.Wrapf(err, "having %d", i)
 			}
 		}
 	}
@@ -248,11 +357,17 @@ type ResultColumn struct {
 	Data proto.ColResult
 }
 
-// Column returns new Result
+// Column returns new [ResultColumn].
 func Column(name string, data proto.ColResult) ResultColumn {
 	return ResultColumn{
 		Name: name,
 		Expr: Ident(name),
 		Data: data,
 	}
+}
+
+// WithColumn defines a Common table expression.
+type WithColumn struct {
+	Name string
+	Expr Expr
 }

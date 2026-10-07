@@ -8,10 +8,10 @@ import (
 	"github.com/go-logfmt/logfmt"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlabels"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlerrors"
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlabels"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlerrors"
+	"github.com/oteldb/oteldb/internal/otelstorage"
 )
 
 // LogfmtExtractor is a Logfmt label extractor.
@@ -65,28 +65,40 @@ func (e *LogfmtExtractor) extractSome(line string, set logqlabels.LabelSet) erro
 	// TODO(tdakkota): re-use decoder somehow.
 	d := logfmt.NewDecoder(strings.NewReader(line))
 
+	parsed := map[logql.Label]string{}
 	for d.ScanRecord() {
 		for d.ScanKeyval() {
 			if label, ok := e.labels[string(d.Key())]; ok {
 				// TODO(tdakkota): try string interning
-				set.Set(label, pcommon.NewValueStr(string(d.Value())))
+				parsed[label] = string(d.Value())
 			}
 		}
 	}
-
-	return d.Err()
+	if err := d.Err(); err != nil {
+		return err
+	}
+	for label, val := range parsed {
+		set.Set(label, pcommon.NewValueStr(val))
+	}
+	return nil
 }
 
 func (e *LogfmtExtractor) extractAll(line string, set logqlabels.LabelSet) error {
 	// TODO(tdakkota): re-use decoder somehow.
 	d := logfmt.NewDecoder(strings.NewReader(line))
 
+	parsed := map[logql.Label]string{}
 	for d.ScanRecord() {
 		for d.ScanKeyval() {
 			// TODO(tdakkota): try string interning
-			set.Set(logql.Label(d.Key()), pcommon.NewValueStr(string(d.Value())))
+			parsed[logql.Label(d.Key())] = string(d.Value())
 		}
 	}
-
-	return d.Err()
+	if err := d.Err(); err != nil {
+		return err
+	}
+	for label, val := range parsed {
+		set.Set(label, pcommon.NewValueStr(val))
+	}
+	return nil
 }

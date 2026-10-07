@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql"
 )
 
 func TestClickhouseOptimizer_offloadLabelFilters(t *testing.T) {
@@ -242,7 +242,6 @@ func TestClickhouseOptimizer_offloadLabelFilters(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			defer func() {
 				if t.Failed() {

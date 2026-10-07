@@ -19,18 +19,18 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/exp/maps"
 
-	"github.com/go-faster/oteldb/integration/requirex"
-	"github.com/go-faster/oteldb/integration/tempoe2e"
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/tempoapi"
-	"github.com/go-faster/oteldb/internal/tempohandler"
-	"github.com/go-faster/oteldb/internal/traceql"
-	"github.com/go-faster/oteldb/internal/traceql/traceqlengine"
-	"github.com/go-faster/oteldb/internal/tracestorage"
+	"github.com/oteldb/oteldb/integration/requirex"
+	"github.com/oteldb/oteldb/integration/tempoe2e"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/tempoapi"
+	"github.com/oteldb/oteldb/internal/tempohandler"
+	"github.com/oteldb/oteldb/internal/traceql"
+	"github.com/oteldb/oteldb/internal/traceql/traceqlengine"
+	"github.com/oteldb/oteldb/internal/tracestorage"
 )
 
-func readBatchSet(p string) (s tempoe2e.BatchSet, _ error) {
-	f, err := os.Open(p)
+func readBatchSet() (s tempoe2e.BatchSet, _ error) {
+	f, err := os.Open("_testdata/traces.json")
 	if err != nil {
 		return s, err
 	}
@@ -41,21 +41,11 @@ func readBatchSet(p string) (s tempoe2e.BatchSet, _ error) {
 }
 
 func setupDB(
-	ctx context.Context,
 	t *testing.T,
 	provider trace.TracerProvider,
-	set tempoe2e.BatchSet,
-	inserter tracestorage.Inserter,
 	querier tracestorage.Querier,
 	engineQuerier traceqlengine.Querier,
 ) *tempoapi.Client {
-	consumer := tracestorage.NewConsumer(inserter)
-	for i, b := range set.Batches {
-		if err := consumer.ConsumeTraces(ctx, b); err != nil {
-			t.Fatalf("Send batch %d: %+v", i, err)
-		}
-	}
-
 	var engine *traceqlengine.Engine
 	if engineQuerier != nil {
 		engine = traceqlengine.NewEngine(engineQuerier, traceqlengine.Options{
@@ -81,20 +71,34 @@ func setupDB(
 	return c
 }
 
-func runTest(
-	ctx context.Context,
-	t *testing.T,
-	provider trace.TracerProvider,
-	inserter tracestorage.Inserter,
-	querier tracestorage.Querier,
-	engineQuerier traceqlengine.Querier,
-) {
-	set, err := readBatchSet("_testdata/traces.json")
+func loadTestData(ctx context.Context, t *testing.T, inserter tracestorage.Inserter) tempoe2e.BatchSet {
+	set, err := readBatchSet()
 	require.NoError(t, err)
 	require.NotEmpty(t, set.Batches)
 	require.NotEmpty(t, set.Tags)
 	require.NotEmpty(t, set.Traces)
 
+	consumer := tracestorage.NewConsumer(inserter)
+	for i, b := range set.Batches {
+		if err := consumer.ConsumeTraces(ctx, b); err != nil {
+			t.Fatalf("Send batch %d: %+v", i, err)
+		}
+	}
+	return set
+}
+
+func tempoTime(ts time.Time) tempoapi.OptTempoTime {
+	return tempoapi.NewOptTempoTime(tempoapi.TempoTime(ts.Format(time.RFC3339Nano)))
+}
+
+func runTest(
+	ctx context.Context,
+	t *testing.T,
+	provider trace.TracerProvider,
+	set tempoe2e.BatchSet,
+	querier tracestorage.Querier,
+	engineQuerier traceqlengine.Querier,
+) {
 	var (
 		resourceTagNames = map[string]struct{}{}
 		spanTagNames     = map[string]struct{}{}
@@ -112,10 +116,10 @@ func runTest(
 		}
 	}
 
-	c := setupDB(ctx, t, provider, set, inserter, querier, engineQuerier)
+	c := setupDB(t, provider, querier, engineQuerier)
 	var (
-		start = tempoapi.NewOptUnixSeconds(set.Start.AsTime().Add(-time.Second))
-		end   = tempoapi.NewOptUnixSeconds(set.End.AsTime())
+		start = tempoTime(set.Start.AsTime().Add(-time.Second))
+		end   = tempoTime(set.End.AsTime())
 	)
 	t.Run("SearchTags", func(t *testing.T) {
 		for _, tt := range []struct {
@@ -164,7 +168,6 @@ func runTest(
 				false,
 			},
 		} {
-			tt := tt
 			t.Run(tt.name, func(t *testing.T) {
 				a := require.New(t)
 
@@ -238,7 +241,6 @@ func runTest(
 				false,
 			},
 		} {
-			tt := tt
 			t.Run(tt.name, func(t *testing.T) {
 				a := require.New(t)
 
@@ -300,7 +302,7 @@ func runTest(
 				a.NoError(err)
 				a.Len(r.TagValues, len(tagValues))
 				for _, val := range r.TagValues {
-					a.Containsf(tagValues, val.Value, "check tag %q", tagName)
+					a.Containsf(tagValues, val.Value.Or(""), "check tag %q", tagName)
 				}
 			}
 		})
@@ -479,7 +481,6 @@ func runTest(
 				false,
 			},
 		} {
-			tt := tt
 			t.Run(tt.name, func(t *testing.T) {
 				a := require.New(t)
 
@@ -494,7 +495,7 @@ func runTest(
 				var got []string
 				for _, v := range r.TagValues {
 					a.Equal(tt.wantType, v.Type)
-					got = append(got, v.Value)
+					got = append(got, v.Value.Or(""))
 				}
 				requirex.Unique(t, got)
 				a.ElementsMatch(tt.want, got)
@@ -508,11 +509,14 @@ func runTest(
 			for traceID, trace := range set.Traces {
 				uid := uuid.UUID(traceID)
 
-				r, err := c.TraceByID(ctx, tempoapi.TraceByIDParams{TraceID: otelstorage.TraceID(traceID).Hex()})
+				r, err := c.TraceByID(ctx, tempoapi.TraceByIDParams{
+					TraceID: otelstorage.TraceID(traceID).Hex(),
+					Accept:  tempoapi.NewOptString("application/protobuf"),
+				})
 				a.NoError(err)
-				a.IsType(&tempoapi.TraceByID{}, r)
+				a.IsType(&tempoapi.TraceByIDHeaders{}, r)
 
-				data, err := io.ReadAll(r.(*tempoapi.TraceByID))
+				data, err := io.ReadAll(r.(*tempoapi.TraceByIDHeaders).Response)
 				a.NoError(err)
 
 				var u ptrace.ProtoUnmarshaler
@@ -593,10 +597,11 @@ func runTest(
 			a.Equal(int64(expectSpan.StartTimestamp()), start)
 			a.Equal(int64(expectSpan.EndTimestamp()), end)
 
-			a.Equal(
-				getRawMapFromAPI(gotSpan.Attributes),
-				expectSpan.Attributes().AsRaw(),
-			)
+			// TraceQL search only propagates attributes referenced by the
+			// query, so the API response is a subset of the raw span
+			// attributes (unlike logfmt tag search, which returns full
+			// span attributes and is thus an exact match).
+			assertAttrsSubset(a, expectSpan.Attributes().AsRaw(), getRawMapFromAPI(gotSpan.Attributes))
 		}
 	}
 
@@ -653,6 +658,12 @@ func runTest(
 			"http.method":      pcommon.NewValueStr("POST"),
 			"http.status_code": pcommon.NewValueInt(200),
 		})
+		var (
+			randomTraceID      = set.AnyTraceID()
+			randomSpanID       = set.AnySpanID()
+			randomParentSpanID = set.AnyParentSpanID()
+			randomEventName    = set.AnyEventName()
+		)
 		t.Run("Search", func(t *testing.T) {
 			queries := []struct {
 				query      string
@@ -733,6 +744,22 @@ func runTest(
 					`{ name = "list-articles" || name = "clearly-not-exist-name" }`,
 					selectSpans(set, byName("list-articles")),
 				},
+				{
+					fmt.Sprintf(`{ trace:id = %q }`, randomTraceID.String()),
+					selectSpans(set, byTraceID(randomTraceID)),
+				},
+				{
+					fmt.Sprintf(`{ span:id = %q }`, randomSpanID.String()),
+					selectSpans(set, bySpanID(randomSpanID)),
+				},
+				{
+					fmt.Sprintf(`{ span:parentID = %q }`, randomParentSpanID.String()),
+					selectSpans(set, byParentSpanID(randomParentSpanID)),
+				},
+				{
+					fmt.Sprintf(`{ event:name = %q }`, randomEventName),
+					selectSpans(set, byEventName(randomEventName)),
+				},
 				// Empty set.
 				{`{ resource.http.method = "POST" }`, nil},
 				{`{ duration > 10h }`, nil},
@@ -755,9 +782,11 @@ func runTest(
 				{`{ .service.namespace = "clearly-does-not-exist" }`, nil},
 				{`{ .service.name = "clearly-does-not-exist" }`, nil},
 				{`{ .service.instance.id = "clearly-does-not-exist" }`, nil},
+				{`{ trace:id = "clearly-does-not-exist" }`, nil},
+				{`{ span:id = "clearly-does-not-exist" }`, nil},
+				{`{ span:parentID = "clearly-does-not-exist" }`, nil},
 			}
 			for i, tt := range queries {
-				tt := tt
 				t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 					t.Parallel()
 
@@ -858,6 +887,16 @@ func runTest(
 	})
 }
 
+// assertAttrsSubset asserts that every key/value pair in got is present
+// with the same value in want.
+func assertAttrsSubset(a *require.Assertions, want, got map[string]any) {
+	for k, gotVal := range got {
+		wantVal, ok := want[k]
+		a.Truef(ok, "unexpected attribute %q", k)
+		a.Equalf(wantVal, gotVal, "attribute %q", k)
+	}
+}
+
 func getRawMapFromAPI(obj []tempoapi.KeyValue) map[string]any {
 	r := make(map[string]any, len(obj))
 	for _, kv := range obj {
@@ -877,14 +916,14 @@ func getRawValueFromAPI(val tempoapi.AnyValue) any {
 	case tempoapi.DoubleValueAnyValue:
 		return val.DoubleValue.DoubleValue
 	case tempoapi.ArrayValueAnyValue:
-		arr := val.ArrayValue.ArrayValue
+		arr := val.ArrayValue.ArrayValue.Values
 		r := make([]any, len(arr))
 		for i, val := range arr {
 			r[i] = getRawValueFromAPI(val)
 		}
 		return arr
 	case tempoapi.KvlistValueAnyValue:
-		return getRawMapFromAPI(val.KvlistValue.KvlistValue)
+		return getRawMapFromAPI(val.KvlistValue.KvlistValue.Values)
 	case tempoapi.BytesValueAnyValue:
 		return val.BytesValue.BytesValue
 	default:
@@ -915,6 +954,35 @@ type byName string
 
 func (n byName) Select(span ptrace.Span) bool {
 	return span.Name() == string(n)
+}
+
+type byTraceID pcommon.TraceID
+
+func (id byTraceID) Select(span ptrace.Span) bool {
+	return span.TraceID() == pcommon.TraceID(id)
+}
+
+type bySpanID pcommon.SpanID
+
+func (id bySpanID) Select(span ptrace.Span) bool {
+	return span.SpanID() == pcommon.SpanID(id)
+}
+
+type byParentSpanID pcommon.SpanID
+
+func (id byParentSpanID) Select(span ptrace.Span) bool {
+	return span.ParentSpanID() == pcommon.SpanID(id)
+}
+
+type byEventName string
+
+func (n byEventName) Select(span ptrace.Span) bool {
+	for _, e := range span.Events().All() {
+		if e.Name() == string(n) {
+			return true
+		}
+	}
+	return false
 }
 
 func selectTraces(set tempoe2e.BatchSet, sel selector) (result selectedSpans) {

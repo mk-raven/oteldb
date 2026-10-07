@@ -3,6 +3,7 @@ package chsql
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/go-faster/errors"
@@ -77,6 +78,11 @@ func (p *Printer) CloseParen() {
 	p.needSpace = true
 }
 
+// Dot writes a dot.
+func (p *Printer) Dot() {
+	p.sb.WriteByte('.')
+}
+
 // Ident writes an identifier.
 func (p *Printer) Ident(tok string) {
 	p.maybeSpace()
@@ -95,6 +101,10 @@ func (p *Printer) Literal(lit string) {
 func (p *Printer) WriteExpr(e Expr) error {
 	switch e.typ {
 	case exprIdent:
+		if e.prefix != "" {
+			p.Ident(e.prefix)
+			p.Dot()
+		}
 		p.Ident(e.tok)
 
 		return nil
@@ -160,6 +170,14 @@ func (p *Printer) WriteExpr(e Expr) error {
 		p.CloseParen()
 
 		return nil
+	case exprLambda:
+		p.Ident(e.tok)
+		p.Ident("->")
+		if err := p.WriteExpr(e.args[0]); err != nil {
+			return err
+		}
+
+		return nil
 	case exprSubQuery:
 		if e.subQuery == nil {
 			return errors.New("subquery is nil")
@@ -172,6 +190,55 @@ func (p *Printer) WriteExpr(e Expr) error {
 		p.CloseParen()
 
 		return nil
+	case exprWindowFunc:
+		// args layout: [fn, part_0..part_n, order_0..order_m]
+		// tok = strconv.Itoa(n) where n = len(partitionBy)
+		if len(e.args) < 1 {
+			return errors.New("window function: missing function argument")
+		}
+		if err := p.WriteExpr(e.args[0]); err != nil {
+			return err
+		}
+		p.Ident("OVER")
+		p.OpenParen()
+		nParts, _ := strconv.Atoi(e.tok)
+		if nParts > 0 {
+			p.Ident("PARTITION")
+			p.By()
+			for i := range nParts {
+				if i != 0 {
+					p.Comma()
+				}
+				if err := p.WriteExpr(e.args[1+i]); err != nil {
+					return errors.Wrapf(err, "window partition by %d", i)
+				}
+			}
+		}
+		orderExprs := e.args[1+nParts:]
+		if len(orderExprs) > 0 {
+			p.Order()
+			p.By()
+			for i, o := range orderExprs {
+				if i != 0 {
+					p.Comma()
+				}
+				if err := p.WriteExpr(o); err != nil {
+					return errors.Wrapf(err, "window order by %d", i)
+				}
+			}
+		}
+		p.CloseParen()
+		return nil
+	case exprSortDir:
+		// args[0] = expression, tok = "ASC" or "DESC"
+		if len(e.args) != 1 {
+			return errors.Errorf("sort direction expression must have exactly one arg, got %d", len(e.args))
+		}
+		if err := p.WriteExpr(e.args[0]); err != nil {
+			return err
+		}
+		p.Ident(e.tok)
+		return nil
 	default:
 		return errors.Errorf("unexpected expression type %v", e.typ)
 	}
@@ -180,6 +247,11 @@ func (p *Printer) WriteExpr(e Expr) error {
 // And writes `AND` ident.
 func (p *Printer) And() {
 	p.Ident("AND")
+}
+
+// With writes `WITH` ident.
+func (p *Printer) With() {
+	p.Ident("WITH")
 }
 
 // Select writes `SELECT` ident.
@@ -192,9 +264,54 @@ func (p *Printer) Distinct() {
 	p.Ident("DISTINCT")
 }
 
+// Final writes `FINAL` ident.
+func (p *Printer) Final() {
+	p.Ident("FINAL")
+}
+
 // From writes `FROM` ident.
 func (p *Printer) From() {
 	p.Ident("FROM")
+}
+
+// Inner writes `INNER` ident.
+func (p *Printer) Inner() {
+	p.Ident("INNER")
+}
+
+// Left writes `LEFT` ident.
+func (p *Printer) Left() {
+	p.Ident("LEFT")
+}
+
+// Right writes `RIGHT` ident.
+func (p *Printer) Right() {
+	p.Ident("RIGHT")
+}
+
+// Full writes `FULL` ident.
+func (p *Printer) Full() {
+	p.Ident("FULL")
+}
+
+// Outer writes `OUTER` ident.
+func (p *Printer) Outer() {
+	p.Ident("OUTER")
+}
+
+// Cross writes `CROSS` ident.
+func (p *Printer) Cross() {
+	p.Ident("CROSS")
+}
+
+// Join writes `JOIN` ident.
+func (p *Printer) Join() {
+	p.Ident("JOIN")
+}
+
+// On writes `ON` ident.
+func (p *Printer) On() {
+	p.Ident("ON")
 }
 
 // Prewhere writes `PREWHERE` ident.
@@ -210,6 +327,11 @@ func (p *Printer) Where() {
 // Group writes `GROUP` ident.
 func (p *Printer) Group() {
 	p.Ident("GROUP")
+}
+
+// Having writes `HAVING` ident.
+func (p *Printer) Having() {
+	p.Ident("HAVING")
 }
 
 // Order writes `ORDER` ident.

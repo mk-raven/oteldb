@@ -3,16 +3,16 @@ package chstorage
 import (
 	"context"
 
-	"github.com/ClickHouse/ch-go"
 	"github.com/go-faster/errors"
-	"github.com/go-faster/sdk/zctx"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/go-faster/oteldb/internal/logstorage"
-	"github.com/go-faster/oteldb/internal/xsync"
+	"github.com/oteldb/oteldb/internal/logstorage"
+	"github.com/oteldb/oteldb/internal/semconv"
+	"github.com/oteldb/oteldb/internal/xspan"
+	"github.com/oteldb/oteldb/internal/xsync"
 )
 
 type recordWriter struct {
@@ -65,15 +65,10 @@ func (i *Inserter) submitLogs(ctx context.Context, logs *logColumns, attrs *logA
 	))
 	defer func() {
 		if rerr != nil {
-			span.RecordError(rerr)
+			xspan.Fail(span, rerr)
 		} else {
-			i.stats.InsertedRecords.Add(ctx, int64(logs.body.Rows()))
-			i.stats.InsertedLogLabels.Add(ctx, int64(attrs.name.Rows()))
-
 			i.stats.Inserts.Add(ctx, 1,
-				metric.WithAttributes(
-					attribute.String("chstorage.signal", "logs"),
-				),
+				metric.WithAttributes(semconv.Signal(semconv.SignalLogs)),
 			)
 		}
 		span.End()
@@ -84,26 +79,22 @@ func (i *Inserter) submitLogs(ctx context.Context, logs *logColumns, attrs *logA
 		ctx := grpCtx
 
 		table := i.tables.Logs
-		if err := i.ch.Do(ctx, ch.Query{
-			Logger: zctx.From(ctx).Named("ch"),
-			Body:   logs.Body(table),
-			Input:  logs.Input(),
-		}); err != nil {
+		if err := i.do(ctx, semconv.SignalLogs, table, logs.Body(table), logs.Input()); err != nil {
 			return errors.Wrap(err, "insert records")
 		}
+		i.stats.InsertedRecords.Add(ctx, int64(logs.body.Rows()))
+
 		return nil
 	})
 	grp.Go(func() error {
 		ctx := grpCtx
 
 		table := i.tables.LogAttrs
-		if err := i.ch.Do(ctx, ch.Query{
-			Logger: zctx.From(ctx).Named("ch"),
-			Body:   attrs.Body(table),
-			Input:  attrs.Input(),
-		}); err != nil {
-			return errors.Wrap(err, "insert labels")
+		if err := i.do(ctx, semconv.SignalLogs, table, attrs.Body(table), attrs.Input()); err != nil {
+			return errors.Wrap(err, "insert log labels")
 		}
+		i.stats.InsertedLogLabels.Add(ctx, int64(attrs.name.Rows()))
+
 		return nil
 	})
 	return grp.Wait()

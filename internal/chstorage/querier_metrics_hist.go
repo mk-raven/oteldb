@@ -28,60 +28,8 @@ type expHistData struct {
 	flags                []uint32
 }
 
-func (e expHistData) Iterator(ts []int64) chunkenc.Iterator {
-	return newExpHistIterator(e, ts)
-}
-
-type expHistIterator struct {
-	values expHistData
-
-	current histogram.Histogram
-	err     error
-
-	ts []int64
-	n  int
-}
-
-var _ chunkenc.Iterator = (*expHistIterator)(nil)
-
-func newExpHistIterator(values expHistData, ts []int64) *expHistIterator {
-	return &expHistIterator{
-		values: values,
-		ts:     ts,
-		n:      -1,
-	}
-}
-
-// Next advances the iterator by one and returns the type of the value
-// at the new position (or ValNone if the iterator is exhausted).
-func (p *expHistIterator) Next() chunkenc.ValueType {
-	if p.n+1 >= len(p.ts) {
-		return chunkenc.ValNone
-	}
-	p.n++
-	p.current, p.err = p.loadValue()
-	return chunkenc.ValFloatHistogram
-}
-
-// Seek advances the iterator forward to the first sample with a
-// timestamp equal or greater than t. If the current sample found by a
-// previous `Next` or `Seek` operation already has this property, Seek
-// has no effect. If a sample has been found, Seek returns the type of
-// its value. Otherwise, it returns ValNone, after which the iterator is
-// exhausted.
-func (p *expHistIterator) Seek(seek int64) chunkenc.ValueType {
-	// Find the closest value.
-	if !seekIterator(p.ts, &p.n, seek) {
-		return chunkenc.ValNone
-	}
-	p.current, p.err = p.loadValue()
-	return chunkenc.ValFloatHistogram
-}
-
-const defaultZeroThreshold = 1e-128
-
-func (p *expHistIterator) loadValue() (h histogram.Histogram, _ error) {
-	scale := p.values.scale[p.n]
+func (e *expHistData) value(idx int) (h histogram.Histogram, _ error) {
+	scale := e.scale[idx]
 	if scale < -4 {
 		return h, errors.Errorf("cannot convert histogram, scale must be >= -4, was %d", scale)
 	}
@@ -92,11 +40,11 @@ func (p *expHistIterator) loadValue() (h histogram.Histogram, _ error) {
 		scale = 8
 	}
 
-	pSpans, pDeltas, err := convertBucketsLayout(p.values.positiveOffset[p.n], p.values.positiveBucketCounts[p.n], scaleDown)
+	pSpans, pDeltas, err := convertBucketsLayout(e.positiveOffset[idx], e.positiveBucketCounts[idx], scaleDown)
 	if err != nil {
 		return h, errors.Wrap(err, "convert positive buckets")
 	}
-	nSpans, nDeltas, err := convertBucketsLayout(p.values.negativeOffset[p.n], p.values.negativeBucketCounts[p.n], scaleDown)
+	nSpans, nDeltas, err := convertBucketsLayout(e.negativeOffset[idx], e.negativeBucketCounts[idx], scaleDown)
 	if err != nil {
 		return h, errors.Wrap(err, "convert negative buckets")
 	}
@@ -104,7 +52,7 @@ func (p *expHistIterator) loadValue() (h histogram.Histogram, _ error) {
 	h = histogram.Histogram{
 		Schema: scale,
 
-		ZeroCount: p.values.zerocount[p.n],
+		ZeroCount: e.zerocount[idx],
 		// TODO use zero_threshold, if set, see
 		// https://github.com/open-telemetry/opentelemetry-proto/pull/441
 		ZeroThreshold: defaultZeroThreshold,
@@ -115,14 +63,14 @@ func (p *expHistIterator) loadValue() (h histogram.Histogram, _ error) {
 		NegativeBuckets: nDeltas,
 	}
 
-	if flags := pmetric.DataPointFlags(p.values.flags[p.n]); flags.NoRecordedValue() {
+	if flags := pmetric.DataPointFlags(e.flags[idx]); flags.NoRecordedValue() {
 		h.Sum = math.Float64frombits(value.StaleNaN)
 		h.Count = value.StaleNaN
 	} else {
-		if sum := p.values.sum[p.n]; sum.Set {
+		if sum := e.sum[idx]; sum.Set {
 			h.Sum = sum.Value
 		}
-		h.Count = p.values.count[p.n]
+		h.Count = e.count[idx]
 	}
 	return h, nil
 }
@@ -164,7 +112,7 @@ func convertBucketsLayout(offset int32, bucketCounts []uint64, scaleDown int32) 
 		Length: 0,
 	})
 
-	for i := 0; i < numBuckets; i++ {
+	for i := range numBuckets {
 		// The offset is scaled and adjusted by 1 as described above.
 		nextBucketIdx := (int32(i)+offset)>>scaleDown + 1
 		if bucketIdx == nextBucketIdx { // We have not collected enough buckets to merge yet.
@@ -188,7 +136,7 @@ func convertBucketsLayout(offset int32, bucketCounts []uint64, scaleDown int32) 
 		} else {
 			// We have found a small gap (or no gap at all).
 			// Insert empty buckets as needed.
-			for j := int32(0); j < gap; j++ {
+			for range gap {
 				appendDelta(0)
 			}
 		}
@@ -209,13 +157,71 @@ func convertBucketsLayout(offset int32, bucketCounts []uint64, scaleDown int32) 
 	} else {
 		// We have found a small gap (or no gap at all).
 		// Insert empty buckets as needed.
-		for j := int32(0); j < gap; j++ {
+		for range gap {
 			appendDelta(0)
 		}
 	}
 	appendDelta(count)
 
 	return spans, deltas, nil
+}
+
+func (e expHistData) Iterator(ts []int64) chunkenc.Iterator {
+	return newExpHistIterator(e, ts)
+}
+
+type expHistIterator struct {
+	values expHistData
+	step   int64
+
+	current histogram.Histogram
+	err     error
+
+	ts []int64
+	n  int
+}
+
+var _ chunkenc.Iterator = (*expHistIterator)(nil)
+
+func newExpHistIterator(values expHistData, ts []int64) *expHistIterator {
+	return &expHistIterator{
+		values: values,
+		ts:     ts,
+		step:   computeStep(ts),
+		n:      -1,
+	}
+}
+
+// Next advances the iterator by one and returns the type of the value
+// at the new position (or ValNone if the iterator is exhausted).
+func (p *expHistIterator) Next() chunkenc.ValueType {
+	if p.n+1 >= len(p.ts) {
+		return chunkenc.ValNone
+	}
+	p.n++
+	p.current, p.err = p.loadValue()
+	return chunkenc.ValFloatHistogram
+}
+
+// Seek advances the iterator forward to the first sample with a
+// timestamp equal or greater than t. If the current sample found by a
+// previous `Next` or `Seek` operation already has this property, Seek
+// has no effect. If a sample has been found, Seek returns the type of
+// its value. Otherwise, it returns ValNone, after which the iterator is
+// exhausted.
+func (p *expHistIterator) Seek(seek int64) chunkenc.ValueType {
+	// Find the closest value.
+	if !seekIterator(p.ts, &p.n, p.step, seek) {
+		return chunkenc.ValNone
+	}
+	p.current, p.err = p.loadValue()
+	return chunkenc.ValHistogram
+}
+
+const defaultZeroThreshold = 1e-128
+
+func (p *expHistIterator) loadValue() (histogram.Histogram, error) {
+	return p.values.value(p.n)
 }
 
 // At returns the current timestamp/value pair if the value is a float.
@@ -227,9 +233,12 @@ func (p *expHistIterator) At() (t int64, v float64) {
 // AtHistogram returns the current timestamp/value pair if the value is
 // a histogram with integer counts. Before the iterator has advanced,
 // the behavior is unspecified.
-func (p *expHistIterator) AtHistogram(*histogram.Histogram) (t int64, h *histogram.Histogram) {
+func (p *expHistIterator) AtHistogram(h *histogram.Histogram) (t int64, _ *histogram.Histogram) {
 	t = p.AtT()
-	h = &p.current
+	if h == nil {
+		h = new(histogram.Histogram)
+	}
+	*h = p.current
 	return t, h
 }
 
@@ -246,6 +255,14 @@ func (p *expHistIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64, *h
 // Before the iterator has advanced, the behavior is unspecified.
 func (p *expHistIterator) AtT() int64 {
 	return p.ts[p.n]
+}
+
+// AtST returns the current start timestamp.
+// Returns 0 if the start timestamp is not implemented or not set.
+// Before the iterator has advanced, the behavior is unspecified.
+func (p *expHistIterator) AtST() int64 {
+	// TODO(tdakkota): we actually can support it
+	return 0
 }
 
 // Err returns the current error. It should be used only after the

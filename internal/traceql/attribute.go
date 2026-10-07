@@ -3,6 +3,7 @@ package traceql
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/go-faster/errors"
 )
@@ -14,7 +15,10 @@ func ParseAttribute(attr string) (a Attribute, _ error) {
 		return a, err
 	}
 
-	a, ok := p.tryAttribute()
+	a, ok, err := p.tryAttribute()
+	if err != nil {
+		return a, errors.Wrapf(err, "invalid attribute %q", attr)
+	}
 	if !ok {
 		return a, errors.Errorf("invalid attribute %q", attr)
 	}
@@ -51,6 +55,32 @@ func (s Attribute) String() string {
 		return "rootServiceName"
 	case TraceDuration:
 		return "traceDuration"
+	case SpanStatusMessage:
+		return "statusMessage"
+	case NestedSetLeft:
+		return "nestedSetLeft"
+	case NestedSetRight:
+		return "nestedSetRight"
+	case NestedSetParent:
+		return "nestedSetParent"
+	case SpanID:
+		return "span:id"
+	case ParentID:
+		return "span:parentID"
+	case TraceID:
+		return "trace:id"
+	case EventName:
+		return "event:name"
+	case EventTimeSinceStart:
+		return "event:timeSinceStart"
+	case LinkTraceID:
+		return "link:traceID"
+	case LinkSpanID:
+		return "link:spanID"
+	case InstrumentationName:
+		return "instrumentation:name"
+	case InstrumentationVersion:
+		return "instrumentation:version"
 	default:
 		// SpanAttribute.
 		var (
@@ -68,12 +98,62 @@ func (s Attribute) String() string {
 		case ScopeSpan:
 			sb.WriteString("span")
 			needDot = true
+		case ScopeInstrumentation:
+			sb.WriteString("instrumentation")
+			needDot = true
+		case ScopeEvent:
+			sb.WriteString("event")
+			needDot = true
+		case ScopeLink:
+			sb.WriteString("link")
+			needDot = true
 		}
 		if needDot {
 			sb.WriteByte('.')
 		}
-		sb.WriteString(s.Name)
+		sb.WriteString(quoteAttributeName(s.Name))
 		return sb.String()
+	}
+}
+
+// quoteAttributeName quotes a name that would not lex back as a selector.
+func quoteAttributeName(name string) string {
+	quote := name == ""
+	for _, r := range name {
+		if !isAttributeNameRune(r) {
+			quote = true
+			break
+		}
+	}
+	if !quote {
+		return name
+	}
+
+	var sb strings.Builder
+	sb.Grow(len(name) + 2)
+	sb.WriteByte('"')
+	for _, r := range name {
+		if r == '"' || r == '\\' {
+			sb.WriteByte('\\')
+		}
+		sb.WriteRune(r)
+	}
+	sb.WriteByte('"')
+	return sb.String()
+}
+
+// isAttributeNameRune whether r may appear in an unquoted attribute name.
+//
+// Must match the lexer's notion of what ends a selector.
+func isAttributeNameRune(r rune) bool {
+	if unicode.IsSpace(r) {
+		return false
+	}
+	switch r {
+	case '{', '}', '(', ')', '=', '~', '!', '<', '>', '&', '|', '^', ',', '"', '\\':
+		return false
+	default:
+		return true
 	}
 }
 
@@ -88,6 +168,8 @@ func (s *Attribute) ValueType() StaticType {
 		return TypeString
 	case SpanStatus:
 		return TypeSpanStatus
+	case SpanStatusMessage:
+		return TypeString
 	case SpanKind:
 		return TypeSpanKind
 	case SpanParent:
@@ -98,6 +180,18 @@ func (s *Attribute) ValueType() StaticType {
 		return TypeString
 	case TraceDuration:
 		return TypeDuration
+	case NestedSetLeft, NestedSetRight, NestedSetParent:
+		return TypeInt
+	case SpanID, ParentID, TraceID:
+		return TypeString
+	case EventName:
+		return TypeString
+	case EventTimeSinceStart:
+		return TypeDuration
+	case LinkTraceID, LinkSpanID:
+		return TypeString
+	case InstrumentationName, InstrumentationVersion:
+		return TypeString
 	default:
 		// Type determined at execution time.
 		return TypeAttribute
@@ -118,6 +212,20 @@ const (
 	RootSpanName
 	RootServiceName
 	TraceDuration
+	// Scoped intrinsics added with TraceQL v2.
+	SpanStatusMessage
+	NestedSetLeft
+	NestedSetRight
+	NestedSetParent
+	SpanID
+	ParentID
+	TraceID
+	EventName
+	EventTimeSinceStart
+	LinkTraceID
+	LinkSpanID
+	InstrumentationName
+	InstrumentationVersion
 )
 
 var intrinsicNames = func() (r []string) {
@@ -141,6 +249,8 @@ const (
 	ScopeResource
 	ScopeSpan
 	ScopeInstrumentation
+	ScopeEvent
+	ScopeLink
 )
 
 // String implements [fmt.Stringer].
@@ -153,7 +263,11 @@ func (s AttributeScope) String() string {
 	case ScopeSpan:
 		return "span"
 	case ScopeInstrumentation:
-		return "<instrumentation>"
+		return "instrumentation"
+	case ScopeEvent:
+		return "event"
+	case ScopeLink:
+		return "link"
 	default:
 		return fmt.Sprintf("unknown scope %d", uint8(s))
 	}

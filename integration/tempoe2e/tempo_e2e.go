@@ -10,10 +10,10 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/traceql"
-	"github.com/go-faster/oteldb/internal/traceql/traceqlengine"
-	"github.com/go-faster/oteldb/internal/tracestorage"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/traceql"
+	"github.com/oteldb/oteldb/internal/traceql/traceqlengine"
+	"github.com/oteldb/oteldb/internal/tracestorage"
 )
 
 // BatchSet is a set of batches.
@@ -53,6 +53,49 @@ func ParseBatchSet(r io.Reader) (s BatchSet, _ error) {
 		s.addBatch(raw)
 	}
 	return s, nil
+}
+
+// AnyTraceID returns random trace ID from the set.
+func (s *BatchSet) AnyTraceID() pcommon.TraceID {
+	for traceID := range s.Traces {
+		return traceID
+	}
+	return pcommon.TraceID{}
+}
+
+// AnySpanID returns random span ID from the set.
+func (s *BatchSet) AnySpanID() pcommon.SpanID {
+	for _, trace := range s.Traces {
+		for spanID := range trace.Spanset {
+			return spanID
+		}
+	}
+	return pcommon.SpanID{}
+}
+
+// AnyParentSpanID returns random parent span ID from the set.
+func (s *BatchSet) AnyParentSpanID() pcommon.SpanID {
+	for _, trace := range s.Traces {
+		for _, span := range trace.Spanset {
+			if parent := span.ParentSpanID(); !parent.IsEmpty() {
+				return parent
+			}
+		}
+	}
+	return pcommon.SpanID{}
+}
+
+// AnyEventName returns random event name from the set.
+func (s *BatchSet) AnyEventName() string {
+	for _, trace := range s.Traces {
+		for _, span := range trace.Spanset {
+			events := span.Events()
+			if events.Len() > 0 {
+				return events.At(0).Name()
+			}
+		}
+	}
+	return ""
 }
 
 func (s *BatchSet) addBatch(raw ptrace.Traces) {

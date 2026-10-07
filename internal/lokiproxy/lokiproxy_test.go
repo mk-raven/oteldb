@@ -9,7 +9,7 @@ import (
 	"github.com/go-faster/jx"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-faster/oteldb/internal/lokiapi"
+	"github.com/oteldb/oteldb/internal/lokiapi"
 )
 
 //go:embed _testdata
@@ -31,7 +31,6 @@ func TestQueryResponseJSON(t *testing.T) {
 			require.NoError(t, err)
 
 			for i, f := range files {
-				f := f
 				t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 					data, err := testdata.ReadFile(path.Join(root, respType, f.Name()))
 					require.NoError(t, err)

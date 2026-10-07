@@ -26,7 +26,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/go-faster/oteldb/internal/promapi"
+	"github.com/oteldb/oteldb/internal/promapi"
 )
 
 type Bench struct {
@@ -197,7 +197,7 @@ func (s *Bench) RunReporter(ctx context.Context) error {
 				lastHash = info.Hash
 			}
 			var b strings.Builder
-			b.WriteString(fmt.Sprintf("m=%s", fmtInt(info.Count*s.targetsCount)))
+			fmt.Fprintf(&b, "m=%s", fmtInt(info.Count*s.targetsCount))
 			if v := s.storageInfo.Load(); v != nil && s.clickhouseAddr != "" {
 				v.WriteInfo(&b, now)
 			}
@@ -265,7 +265,7 @@ func allocateAddr(defaultAddr string) string {
 		return defaultAddr
 	}
 	var lastErr error
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		// Listen on random port.
 		laddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:")
 		if err != nil {
@@ -474,7 +474,7 @@ func (s *Bench) runQueryCPU(ctx context.Context, client promapi.Invoker) (*cpuQu
 		Query: q,
 		Start: prometheusTimestamp(start.Add(-time.Minute)),
 		End:   prometheusTimestamp(start),
-		Step:  "1s",
+		Step:  promapi.NewOptString("1s"),
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "query")
@@ -526,15 +526,15 @@ func (s *Bench) RunQueryReporter(ctx context.Context) error {
 				continue
 			}
 			if stats.Count > 0 {
-				b.WriteString(fmt.Sprintf("cpu=%s", fmtInt(stats.Count)))
+				fmt.Fprintf(&b, "cpu=%s", fmtInt(stats.Count))
 			} else {
 				b.WriteString("cpu=N/A")
 			}
 			b.WriteString(" ")
-			b.WriteString(fmt.Sprintf("d=%s", stats.Duration.Round(time.Millisecond)))
+			fmt.Fprintf(&b, "d=%s", stats.Duration.Round(time.Millisecond))
 			if !stats.Latest.IsZero() {
 				b.WriteString(" ")
-				b.WriteString(fmt.Sprintf("lag=%s", time.Since(stats.Latest).Round(time.Millisecond)))
+				fmt.Fprintf(&b, "lag=%s", time.Since(stats.Latest).Round(time.Millisecond))
 			}
 			fmt.Println(b.String())
 		}

@@ -2,18 +2,16 @@ package logql
 
 import (
 	"fmt"
+	"iter"
 	"regexp"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlpattern"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlpattern"
 )
-
-func ptrTo[T any](v T) *T {
-	return &v
-}
 
 type TestCase struct {
 	input   string
@@ -52,6 +50,28 @@ var tests = []TestCase{
 			Sel: Selector{
 				Matchers: []LabelMatcher{
 					{"foo", OpEq, "bar", nil},
+				},
+			},
+		},
+		false,
+	},
+	{
+		`{"foo.bar" = "bar"}`,
+		&LogExpr{
+			Sel: Selector{
+				Matchers: []LabelMatcher{
+					{"foo.bar", OpEq, "bar", nil},
+				},
+			},
+		},
+		false,
+	},
+	{
+		"{`foo.bar` = `bar`}",
+		&LogExpr{
+			Sel: Selector{
+				Matchers: []LabelMatcher{
+					{"foo.bar", OpEq, "bar", nil},
 				},
 			},
 		},
@@ -579,6 +599,33 @@ var tests = []TestCase{
 		},
 		false,
 	},
+	{
+		"{service_name=\"clickhouse\"}" +
+			" | label_format log_line_contains_trace_id=`{{ contains \"a3bb0696568ee5069bf8fdc682631ddc\" __line__  }}`" +
+			" | log_line_contains_trace_id=\"true\" OR trace_id=\"a3bb0696568ee5069bf8fdc682631ddc\"",
+		&LogExpr{
+			Sel: Selector{
+				Matchers: []LabelMatcher{
+					{"service_name", OpEq, "clickhouse", nil},
+				},
+			},
+			Pipeline: []PipelineStage{
+				&LabelFormatExpr{
+					Values: []LabelTemplate{
+						{Label: "log_line_contains_trace_id", Template: `{{ contains "a3bb0696568ee5069bf8fdc682631ddc" __line__  }}`},
+					},
+				},
+				&LabelFilter{
+					Pred: &LabelPredicateBinOp{
+						Left:  &LabelMatcher{"log_line_contains_trace_id", OpEq, "true", nil},
+						Op:    OpOr,
+						Right: &LabelMatcher{"trace_id", OpEq, "a3bb0696568ee5069bf8fdc682631ddc", nil},
+					},
+				},
+			},
+		},
+		false,
+	},
 
 	// Metric queries.
 	// Range aggregation.
@@ -641,7 +688,7 @@ var tests = []TestCase{
 				},
 				Range: 5 * time.Hour,
 			},
-			Parameter: ptrTo(10.0),
+			Parameter: new(10.0),
 			Grouping: &Grouping{
 				Labels: []Label{"bar", "foo"},
 			},
@@ -736,7 +783,7 @@ var tests = []TestCase{
 					Range: 1 * time.Minute,
 				},
 			},
-			Parameter: ptrTo(1),
+			Parameter: new(1),
 			Grouping: &Grouping{
 				Without: true,
 			},
@@ -1137,8 +1184,11 @@ var tests = []TestCase{
 	{"{foo}", nil, true},
 	{"{foo =}", nil, true},
 	{`{foo == "bar"}`, nil, true},
+	{`{foo = "bar\"}`, nil, true},
 	{`{foo = bar}`, nil, true},
 	{`{foo = "bar"} | addr == ip(`, nil, true},
+	{`{"foo\"}`, nil, true},
+	{"{`foo`}", nil, true},
 	{`label_replace`, nil, true},
 	{`label_replace(`, nil, true},
 	{`vector`, nil, true},
@@ -1260,7 +1310,6 @@ var tests = []TestCase{
 
 func TestParse(t *testing.T) {
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			defer func() {
 				if t.Failed() {
@@ -1294,6 +1343,105 @@ func FuzzParse(f *testing.F) {
 	})
 }
 
+var (
+	emptySel  = []Selector{{}}
+	foobarSel = []Selector{
+		{
+			Matchers: []LabelMatcher{
+				{Label: "foo", Op: OpEq, Value: "bar"},
+			},
+		},
+	}
+	extractSelectorsTests = []struct {
+		input   string
+		wantSel []Selector
+		wantErr bool
+	}{
+		{`{}`, emptySel, false},
+		{`{} | json`, emptySel, false},
+
+		{`1`, nil, false},
+		{`sum(vector(2)*vector(2))`, nil, false},
+		{`vector(2)`, nil, false},
+		{`vector(2)*vector(3)+vector(4)`, nil, false},
+
+		{`{foo="bar"}`, foobarSel, false},
+		{`({foo="bar"})`, foobarSel, false},
+		{`{foo="bar"} | json`, foobarSel, false},
+		{`count_over_time({foo="bar"}[1m])`, foobarSel, false},
+		{`sum by (foo) (rate({foo="bar"}[1m]))`, foobarSel, false},
+		{`label_replace(rate({foo="bar"}[1m]), "dst", "replacement", "src", ".*")`, foobarSel, false},
+		{`rate({foo="bar"}[1m])*rate({foo="bar"}[1m])+rate({foo="bar"}[1m])`, slices.Repeat(foobarSel, 3), false},
+
+		{`sum(vector(2)*vector(2))`, nil, false},
+
+		// Invalid syntax.
+		{``, nil, true},
+	}
+)
+
+func TestExtractSelectors(t *testing.T) {
+	for i, tt := range extractSelectorsTests {
+		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
+			gotSel, err := ExtractSelectors(tt.input, ParseOptions{AllowDots: true})
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			sels := slices.Collect(gotSel)
+			require.Equal(t, tt.wantSel, sels)
+
+			for i := range tt.wantSel {
+				onlyNSels := collectOnly(gotSel, i)
+				require.Equal(t, tt.wantSel[:i], onlyNSels)
+			}
+		})
+	}
+}
+
+func FuzzExtractSelectors(f *testing.F) {
+	for _, tt := range tests {
+		f.Add(tt.input)
+	}
+	for _, tt := range extractSelectorsTests {
+		f.Add(tt.input)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		defer func() {
+			if r := recover(); r != nil || t.Failed() {
+				t.Logf("Input:\n%s", input)
+			}
+
+			seq, err := ExtractSelectors(input, ParseOptions{AllowDots: true})
+			if err != nil {
+				t.Skipf("Invalid input: %v", err)
+				return
+			}
+
+			for sel := range seq {
+				require.NotEmpty(t, sel.String())
+			}
+		}()
+	})
+}
+
+// collectOnly collects only n elements from the given sequence.
+func collectOnly[T any](seq iter.Seq[T], n int) []T {
+	var (
+		s   = []T{}
+		idx int
+	)
+	for v := range seq {
+		if idx == n {
+			break
+		}
+		s = append(s, v)
+		idx++
+	}
+	return s
+}
+
 func TestParseSelector(t *testing.T) {
 	tests := []struct {
 		input   string
@@ -1315,7 +1463,6 @@ func TestParseSelector(t *testing.T) {
 		{`{} | json`, Selector{}, true},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			gotSel, err := ParseSelector(tt.input, ParseOptions{AllowDots: true})
 			if tt.wantErr {

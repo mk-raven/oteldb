@@ -224,6 +224,18 @@ const (
 	SpansetOpDescendant
 	SpansetOpUnion
 	SpansetOpSibling
+	SpansetOpParent
+	SpansetOpAncestor
+	SpansetOpNotChild
+	SpansetOpNotParent
+	SpansetOpNotDescendant
+	SpansetOpNotAncestor
+	SpansetOpNotSibling
+	SpansetOpUnionChild
+	SpansetOpUnionParent
+	SpansetOpUnionDescendant
+	SpansetOpUnionAncestor
+	SpansetOpUnionSibling
 )
 
 // String implements fmt.Stringer.
@@ -232,13 +244,37 @@ func (op SpansetOp) String() string {
 	case SpansetOpAnd:
 		return "&&"
 	case SpansetOpChild:
-		return "<"
+		return ">"
 	case SpansetOpDescendant:
 		return ">>"
 	case SpansetOpUnion:
 		return "||"
 	case SpansetOpSibling:
 		return "~"
+	case SpansetOpParent:
+		return "<"
+	case SpansetOpAncestor:
+		return "<<"
+	case SpansetOpNotChild:
+		return "!>"
+	case SpansetOpNotParent:
+		return "!<"
+	case SpansetOpNotDescendant:
+		return "!>>"
+	case SpansetOpNotAncestor:
+		return "!<<"
+	case SpansetOpNotSibling:
+		return "!~"
+	case SpansetOpUnionChild:
+		return "&>"
+	case SpansetOpUnionParent:
+		return "&<"
+	case SpansetOpUnionDescendant:
+		return "&>>"
+	case SpansetOpUnionAncestor:
+		return "&<<"
+	case SpansetOpUnionSibling:
+		return "&~"
 	default:
 		return fmt.Sprintf("<unknown op %d>", op)
 	}
@@ -251,10 +287,33 @@ func (op SpansetOp) Precedence() int {
 		return 1
 	case SpansetOpChild,
 		SpansetOpDescendant,
-		SpansetOpSibling:
+		SpansetOpSibling,
+		SpansetOpParent,
+		SpansetOpAncestor,
+		SpansetOpNotChild,
+		SpansetOpNotParent,
+		SpansetOpNotDescendant,
+		SpansetOpNotAncestor,
+		SpansetOpNotSibling,
+		SpansetOpUnionChild,
+		SpansetOpUnionParent,
+		SpansetOpUnionDescendant,
+		SpansetOpUnionAncestor,
+		SpansetOpUnionSibling:
 		return 2
 	default:
 		return -1
+	}
+}
+
+// IsStructural whether op relates two spansets by their position in the trace
+// tree, rather than by set membership.
+func (op SpansetOp) IsStructural() bool {
+	switch op {
+	case SpansetOpAnd, SpansetOpUnion:
+		return false
+	default:
+		return op.Precedence() > 0
 	}
 }
 
@@ -282,6 +341,74 @@ func (op AggregateOp) String() string {
 		return "avg"
 	case AggregateOpSum:
 		return "sum"
+	default:
+		return fmt.Sprintf("<unknown op %d>", op)
+	}
+}
+
+// MetricsOp defines a metrics aggregation operator.
+type MetricsOp int
+
+const (
+	MetricsOpRate MetricsOp = iota + 1
+	MetricsOpCountOverTime
+	MetricsOpMinOverTime
+	MetricsOpMaxOverTime
+	MetricsOpSumOverTime
+	MetricsOpAvgOverTime
+	MetricsOpQuantileOverTime
+	MetricsOpHistogramOverTime
+)
+
+// String implements fmt.Stringer.
+func (op MetricsOp) String() string {
+	switch op {
+	case MetricsOpRate:
+		return "rate"
+	case MetricsOpCountOverTime:
+		return "count_over_time"
+	case MetricsOpMinOverTime:
+		return "min_over_time"
+	case MetricsOpMaxOverTime:
+		return "max_over_time"
+	case MetricsOpSumOverTime:
+		return "sum_over_time"
+	case MetricsOpAvgOverTime:
+		return "avg_over_time"
+	case MetricsOpQuantileOverTime:
+		return "quantile_over_time"
+	case MetricsOpHistogramOverTime:
+		return "histogram_over_time"
+	default:
+		return fmt.Sprintf("<unknown op %d>", op)
+	}
+}
+
+// TakesField whether op aggregates over a span attribute.
+func (op MetricsOp) TakesField() bool {
+	switch op {
+	case MetricsOpRate, MetricsOpCountOverTime:
+		return false
+	default:
+		return true
+	}
+}
+
+// MetricsStageOp defines a metrics second stage operator.
+type MetricsStageOp int
+
+const (
+	MetricsStageOpTopK MetricsStageOp = iota + 1
+	MetricsStageOpBottomK
+)
+
+// String implements fmt.Stringer.
+func (op MetricsStageOp) String() string {
+	switch op {
+	case MetricsStageOpTopK:
+		return "topk"
+	case MetricsStageOpBottomK:
+		return "bottomk"
 	default:
 		return fmt.Sprintf("<unknown op %d>", op)
 	}

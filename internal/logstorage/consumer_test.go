@@ -1,0 +1,255 @@
+package logstorage
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+
+	"github.com/oteldb/oteldb/internal/logparser"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+)
+
+type mockInserter struct {
+	records []Record
+}
+
+var _ Inserter = (*mockInserter)(nil)
+
+// RecordWriter implements [Inserter].
+func (m *mockInserter) RecordWriter(ctx context.Context) (RecordWriter, error) {
+	return &mockRecordWriter{inserter: m}, nil
+}
+
+type mockRecordWriter struct {
+	inserter *mockInserter
+	records  []Record
+}
+
+var _ RecordWriter = (*mockRecordWriter)(nil)
+
+// Add implements [RecordWriter].
+func (m *mockRecordWriter) Add(record Record) error {
+	m.records = append(m.records, record)
+	return nil
+}
+
+// Close implements [RecordWriter].
+func (m *mockRecordWriter) Close() error {
+	return nil
+}
+
+// Submit implements [RecordWriter].
+func (m *mockRecordWriter) Submit(ctx context.Context) error {
+	m.inserter.records = append(m.inserter.records, m.records...)
+	m.records = nil
+	return nil
+}
+
+func TestConsumeLogs(t *testing.T) {
+	ctx := t.Context()
+
+	i := &mockInserter{}
+	c, err := NewConsumer(i, ConsumerOptions{
+		TriggerAttributes: []AttributeRef{
+			{Name: "log.msg", Location: AttributesLocation},
+		},
+		FormatAttributes: []AttributeRef{
+			{Name: "log.format", Location: AnyLocation},
+		},
+		DetectFormats: []logparser.Parser{
+			logparser.GenericJSONParser{},
+			logparser.LogFmtParser{},
+		},
+	})
+	require.NoError(t, err)
+
+	logs := plog.NewLogs()
+	resLogs := logs.ResourceLogs().AppendEmpty()
+	scopeLogs := resLogs.ScopeLogs().AppendEmpty()
+	records := scopeLogs.LogRecords()
+	{
+		record := records.AppendEmpty()
+		record.SetTimestamp(1)
+		record.Body().SetStr(`{"msg": "json-message", "level": "INFO"}`)
+		record.Attributes().PutStr("log.format", "json")
+	}
+	{
+		record := records.AppendEmpty()
+		record.SetTimestamp(2)
+		record.Body().SetStr(`msg=logfmt level=debug`)
+		record.Attributes().PutStr("log.msg", "hello")
+	}
+	{
+		record := records.AppendEmpty()
+		record.SetTimestamp(3)
+		record.Body().SetStr(`<aboba>`)
+		record.Attributes().PutStr("log.msg", "clearly-weird-format")
+	}
+	{
+		record := records.AppendEmpty()
+		record.SetTimestamp(4)
+		record.Body().SetStr(`{bad json message`)
+		record.Attributes().PutStr("log.format", "json")
+	}
+	{
+		record := records.AppendEmpty()
+		record.SetTimestamp(5)
+		record.Body().SetStr(`{detected bad json message`)
+		record.Attributes().PutStr("log.msg", "clearly-bad-format")
+	}
+	{
+		record := records.AppendEmpty()
+		record.SetTimestamp(6)
+		record.SetSeverityNumber(plog.SeverityNumberDebug)
+		record.Body().SetStr(`well cooked OTEL record`)
+		record.Attributes().PutStr("method", "GET")
+	}
+	{
+		record := records.AppendEmpty()
+		record.SetTimestamp(7)
+		record.Body().SetStr(`{"msg": "multi-format-message-1", "level": "INFO"}`)
+		record.Attributes().PutStr("log.format", "zap-development,zap-development,json")
+	}
+	{
+		record := records.AppendEmpty()
+		record.SetTimestamp(8)
+		record.Body().SetStr(`{"msg": "multi-format-message-2", "level": "INFO"}`)
+		record.Attributes().PutStr("log.format", "json,logfmt")
+	}
+
+	err = c.ConsumeLogs(ctx, logs)
+	require.NoError(t, err)
+
+	expected := []Record{
+		{
+			Timestamp: 1, Body: "json-message",
+			SeverityText: "INFO", SeverityNumber: plog.SeverityNumberInfo,
+			Attrs:         attrMap("log.format", "json", "logparser.type", "generic-json"),
+			ScopeAttrs:    otelstorage.NewAttrs(),
+			ResourceAttrs: otelstorage.NewAttrs(),
+		},
+		{
+			Timestamp: 2, Body: "logfmt",
+			SeverityText: "debug", SeverityNumber: plog.SeverityNumberDebug,
+			Attrs:         attrMap("log.msg", "hello", "logparser.type", "logfmt"),
+			ScopeAttrs:    otelstorage.NewAttrs(),
+			ResourceAttrs: otelstorage.NewAttrs(),
+		},
+		{
+			Timestamp: 3, Body: "<aboba>",
+			Attrs:         attrMap("log.msg", "clearly-weird-format"),
+			ScopeAttrs:    otelstorage.NewAttrs(),
+			ResourceAttrs: otelstorage.NewAttrs(),
+		},
+		{
+			Timestamp: 4, Body: "{bad json message",
+			Attrs:         attrMap("log.format", "json"),
+			ScopeAttrs:    otelstorage.NewAttrs(),
+			ResourceAttrs: otelstorage.NewAttrs(),
+		},
+		{
+			Timestamp: 5, Body: "{detected bad json message",
+			Attrs:         attrMap("log.msg", "clearly-bad-format"),
+			ScopeAttrs:    otelstorage.NewAttrs(),
+			ResourceAttrs: otelstorage.NewAttrs(),
+		},
+		{
+			Timestamp: 6, Body: "well cooked OTEL record",
+			SeverityText: "Debug", SeverityNumber: plog.SeverityNumberDebug,
+			Attrs:         attrMap("method", "GET"),
+			ScopeAttrs:    otelstorage.NewAttrs(),
+			ResourceAttrs: otelstorage.NewAttrs(),
+		},
+		{
+			Timestamp: 7, Body: "multi-format-message-1",
+			SeverityText: "INFO", SeverityNumber: plog.SeverityNumberInfo,
+			Attrs:         attrMap("log.format", "zap-development,zap-development,json", "logparser.type", "generic-json"),
+			ScopeAttrs:    otelstorage.NewAttrs(),
+			ResourceAttrs: otelstorage.NewAttrs(),
+		},
+		{
+			Timestamp: 8, Body: "multi-format-message-2",
+			SeverityText: "INFO", SeverityNumber: plog.SeverityNumberInfo,
+			Attrs:         attrMap("log.format", "json,logfmt", "logparser.type", "generic-json"),
+			ScopeAttrs:    otelstorage.NewAttrs(),
+			ResourceAttrs: otelstorage.NewAttrs(),
+		},
+	}
+	require.Equal(t, expected, i.records)
+}
+
+func TestConsumeLogsDefaultFormats(t *testing.T) {
+	ctx := t.Context()
+
+	i := &mockInserter{}
+	c, err := NewConsumer(i, ConsumerOptions{})
+	require.NoError(t, err)
+
+	recordTime := time.Date(2024, time.June, 21, 0, 0, 0, 0, time.UTC)
+
+	logs := plog.NewLogs()
+	resLogs := logs.ResourceLogs().AppendEmpty()
+	scopeLogs := resLogs.ScopeLogs().AppendEmpty()
+	records := scopeLogs.LogRecords()
+	{
+		record := records.AppendEmpty()
+		record.SetTimestamp(pcommon.NewTimestampFromTime(recordTime))
+		record.Body().SetStr(`I0621 16:26:15.372343       1 leaderelection.go:250] Starting Provisioner`)
+		record.Attributes().PutStr("log", "klog-line")
+	}
+
+	err = c.ConsumeLogs(ctx, logs)
+	require.NoError(t, err)
+	require.Len(t, i.records, 1)
+
+	got := i.records[0]
+	require.Equal(t, "Starting Provisioner", got.Body)
+	require.Equal(t, plog.SeverityNumberInfo, got.SeverityNumber)
+	require.Equal(t,
+		otelstorage.NewTimestampFromTime(time.Date(2024, time.June, 21, 16, 26, 15, 372343000, time.UTC)),
+		got.Timestamp,
+	)
+
+	attrs := got.Attrs.AsMap()
+	typ, ok := attrs.Get("logparser.type")
+	require.True(t, ok)
+	require.Equal(t, "klog", typ.AsString())
+
+	file, ok := attrs.Get("code.file.path")
+	require.True(t, ok)
+	require.Equal(t, "leaderelection.go", file.AsString())
+}
+
+func attrMap(kv ...string) otelstorage.Attrs {
+	m := pcommon.NewMap()
+	for i := 0; i < len(kv); i += 2 {
+		m.PutStr(kv[i], kv[i+1])
+	}
+	return otelstorage.Attrs(m)
+}
+
+func Test_normalizeSeverity(t *testing.T) {
+	tests := []struct {
+		text       string
+		number     plog.SeverityNumber
+		wantText   string
+		wantNumber plog.SeverityNumber
+	}{
+		{text: "", number: plog.SeverityNumberDebug, wantText: "Debug", wantNumber: plog.SeverityNumberDebug},
+		{text: "debug", number: 0, wantText: "debug", wantNumber: plog.SeverityNumberDebug},
+		{text: "debug", number: plog.SeverityNumberDebug, wantText: "debug", wantNumber: plog.SeverityNumberDebug},
+	}
+	for i, tt := range tests {
+		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
+			number, text := normalizeSeverity(tt.number, tt.text)
+			assert.Equal(t, tt.wantNumber, number)
+			assert.Equal(t, tt.wantText, text)
+		})
+	}
+}

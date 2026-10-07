@@ -12,14 +12,16 @@ import (
 func TestGenerate(t *testing.T) {
 	for _, table := range []Table{
 		{
-			Name:    "logs",
-			Engine:  "MergeTree()",
+			Name: "logs",
+			Engine: Engine{
+				Type: "MergeTree",
+			},
 			Cluster: "foo",
 			TTL: TTL{
 				Delta: time.Hour * 10,
 				Field: "timestamp",
 			},
-			OrderBy: []string{"a", "b"},
+			OrderBy: []string{"a", "toStartOfHour(b)"},
 			Columns: []Column{
 				{
 					Name: "a",
@@ -68,13 +70,18 @@ func TestGenerate(t *testing.T) {
 		},
 	} {
 		t.Run(table.Name, func(t *testing.T) {
-			s, err := Generate(table)
+			s, err := CreateIfNotExists(table)
 			require.NoError(t, err)
 			gold.Str(t, s, "ddl."+table.Name+".sql")
 		})
 	}
-	s, err := Generate(Table{
-		Engine:  "MergeTree()",
+	s, err := CreateIfNotExists(Table{
+		Engine: Engine{
+			Type: "ReplacingMergeTree",
+			Args: []string{
+				"a",
+			},
+		},
 		OrderBy: []string{"a", "b"},
 		Columns: []Column{
 			{

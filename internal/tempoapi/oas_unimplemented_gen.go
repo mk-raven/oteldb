@@ -15,8 +15,8 @@ var _ Handler = UnimplementedHandler{}
 
 // BuildInfo implements buildInfo operation.
 //
-// Returns Tempo buildinfo, in the same format as Prometheus `/api/v1/status/buildinfo`.
-// Used by Grafana to check Tempo API version.
+// Returns Tempo buildinfo, in the same format as Prometheus `/api/v1/status/buildinfo`. Used by
+// Grafana to check Tempo API version.
 //
 // GET /api/status/buildinfo
 func (UnimplementedHandler) BuildInfo(ctx context.Context) (r *PrometheusVersion, _ error) {
@@ -29,6 +29,25 @@ func (UnimplementedHandler) BuildInfo(ctx context.Context) (r *PrometheusVersion
 //
 // GET /api/echo
 func (UnimplementedHandler) Echo(ctx context.Context) (r EchoOK, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// Query implements query operation.
+//
+// The instant version of the Metrics API is similar to the range version, but instead returns a single
+// value for the query.
+//
+// GET /api/metrics/query
+func (UnimplementedHandler) Query(ctx context.Context, params QueryParams) (r *InstantMetrics, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// QueryRange implements queryRange operation.
+//
+// This endpoint returns Prometheus-like time-series for a given metrics query.
+//
+// GET /api/metrics/query_range
+func (UnimplementedHandler) QueryRange(ctx context.Context, params QueryRangeParams) (r *RangeMetrics, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -52,8 +71,7 @@ func (UnimplementedHandler) SearchTagValues(ctx context.Context, params SearchTa
 
 // SearchTagValuesV2 implements searchTagValuesV2 operation.
 //
-// This endpoint retrieves all discovered values and their data types for the given TraceQL
-// identifier.
+// This endpoint retrieves all discovered values and their data types for the given TraceQL identifier.
 //
 // GET /api/v2/search/tag/{attribute_selector}/values
 func (UnimplementedHandler) SearchTagValuesV2(ctx context.Context, params SearchTagValuesV2Params) (r *TagValuesV2, _ error) {
@@ -84,6 +102,15 @@ func (UnimplementedHandler) SearchTagsV2(ctx context.Context, params SearchTagsV
 //
 // GET /api/traces/{traceID}
 func (UnimplementedHandler) TraceByID(ctx context.Context, params TraceByIDParams) (r TraceByIDRes, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// TraceByIDv2 implements traceByIDv2 operation.
+//
+// Querying traces by id.
+//
+// GET /api/v2/traces/{traceID}
+func (UnimplementedHandler) TraceByIDv2(ctx context.Context, params TraceByIDv2Params) (r TraceByIDv2Res, _ error) {
 	return r, ht.ErrNotImplemented
 }
 

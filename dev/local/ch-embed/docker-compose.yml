@@ -5,10 +5,10 @@ volumes:
 
 services:
   oteldb:
-    image: ghcr.io/go-faster/oteldb
+    image: ghcr.io/oteldb/oteldb
     build:
       context: ../../../
-      dockerfile: Dockerfile
+      dockerfile: dev/Dockerfile
     volumes:
       - clickhouse:/clickhouse
     environment:

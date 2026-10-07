@@ -13,13 +13,14 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/go-faster/oteldb/internal/chstorage/chsql"
-	"github.com/go-faster/oteldb/internal/iterators"
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/traceql"
-	"github.com/go-faster/oteldb/internal/traceql/traceqlengine"
-	"github.com/go-faster/oteldb/internal/tracestorage"
-	"github.com/go-faster/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/chstorage/chsql"
+	"github.com/oteldb/oteldb/internal/iterators"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/traceql"
+	"github.com/oteldb/oteldb/internal/traceql/traceqlengine"
+	"github.com/oteldb/oteldb/internal/tracestorage"
+	"github.com/oteldb/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/xspan"
 )
 
 // SearchTags performs search by given tags.
@@ -38,10 +39,7 @@ func (q *Querier) SearchTags(ctx context.Context, tags map[string]string, opts t
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	subquery := chsql.Select(table, chsql.Column("trace_id", nil)).
@@ -122,10 +120,7 @@ func (q *Querier) TagNames(ctx context.Context, opts tracestorage.TagNamesOption
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	var (
@@ -192,10 +187,7 @@ func (q *Querier) TagValues(ctx context.Context, tag traceql.Attribute, opts tra
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	switch tag.Prop {
@@ -254,10 +246,7 @@ func (q *Querier) spanNames(ctx context.Context, tag traceql.Attribute, opts tra
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	var (
@@ -323,10 +312,7 @@ func (q *Querier) attributeValues(ctx context.Context, tag traceql.Attribute, op
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	// FIXME(tdakkota): respect time range parameters.
@@ -402,10 +388,7 @@ func (q *Querier) TraceByID(ctx context.Context, id otelstorage.TraceID, opts tr
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	var (
@@ -458,10 +441,7 @@ func (q *Querier) SelectSpansets(ctx context.Context, params traceqlengine.Selec
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	var (
@@ -636,11 +616,53 @@ func getTraceQLMatcher(matcher traceql.SpanMatcher) (e chsql.Expr, _ bool) {
 			chsql.Ident("kind"),
 			value,
 		), true
+	case traceql.SpanStatusMessage:
+		return op(
+			chsql.Ident("status_message"),
+			value,
+		), true
+	case traceql.SpanID:
+		return op(
+			chsql.Ident("span_id"),
+			chsql.Unhex(value),
+		), true
+	case traceql.ParentID:
+		return op(
+			chsql.Ident("parent_span_id"),
+			chsql.Unhex(value),
+		), true
+	case traceql.TraceID:
+		return op(
+			chsql.Ident("trace_id"),
+			chsql.Unhex(value),
+		), true
+	case traceql.InstrumentationName:
+		return op(
+			chsql.Ident("scope_name"),
+			value,
+		), true
+	case traceql.InstrumentationVersion:
+		return op(
+			chsql.Ident("scope_version"),
+			value,
+		), true
+	case traceql.EventName:
+		return arrayContainsOp(matcher.Op, chsql.Ident("events_names"), value)
+	case traceql.EventTimeSinceStart:
+		// TODO(tdakkota): requires arrayExists with lambda support.
+		return e, false
+	case traceql.LinkTraceID:
+		return arrayContainsOp(matcher.Op, chsql.Ident("links_trace_ids"), chsql.Unhex(value))
+	case traceql.LinkSpanID:
+		return arrayContainsOp(matcher.Op, chsql.Ident("links_span_ids"), chsql.Unhex(value))
 	case traceql.SpanParent,
 		traceql.SpanChildCount,
 		traceql.RootSpanName,
 		traceql.RootServiceName,
-		traceql.TraceDuration:
+		traceql.TraceDuration,
+		traceql.NestedSetLeft,
+		traceql.NestedSetRight,
+		traceql.NestedSetParent:
 		// Unsupported yet.
 		return e, false
 	default:
@@ -695,6 +717,21 @@ func getTraceQLLiteral(s traceql.Static) (value chsql.Expr, _ bool) {
 	}
 }
 
+// arrayContainsOp returns a ClickHouse expression checking whether an array column
+// contains (or does not contain) elem, for the given TraceQL binary op.
+// Only OpEq and OpNotEq are supported; other ops return (zero, false).
+func arrayContainsOp(op traceql.BinaryOp, arr, elem chsql.Expr) (chsql.Expr, bool) {
+	has := chsql.Has(arr, elem)
+	switch op {
+	case traceql.OpEq:
+		return has, true
+	case traceql.OpNotEq:
+		return chsql.Not(has), true
+	default:
+		return chsql.Expr{}, false
+	}
+}
+
 func getTraceQLAttributeColumns(attr traceql.Attribute) iter.Seq[string] {
 	if attr.Prop != traceql.SpanAttribute || attr.Parent {
 		return emptySeq[string]
@@ -715,7 +752,13 @@ func getTraceQLAttributeColumns(attr traceql.Attribute) iter.Seq[string] {
 		return func(yield func(string) bool) {
 			yield(colAttrs)
 		}
+	case traceql.ScopeInstrumentation:
+		return func(yield func(string) bool) {
+			yield(colScope)
+		}
 	default:
+		// ScopeEvent and ScopeLink store attributes in array columns;
+		// attribute-level pushdown is not supported for those scopes.
 		return emptySeq[string]
 	}
 }

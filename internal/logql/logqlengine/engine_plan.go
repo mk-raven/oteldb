@@ -4,11 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/go-faster/oteldb/internal/iterators"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlabels"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlmetric"
-	"github.com/go-faster/oteldb/internal/lokiapi"
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/iterators"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlabels"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlmetric"
+	"github.com/oteldb/oteldb/internal/lokiapi"
+	"github.com/oteldb/oteldb/internal/otelstorage"
 )
 
 // EvalParams sets evaluation parameters.
@@ -22,7 +22,7 @@ type EvalParams struct {
 
 // IsInstant whether query is instant.
 func (p EvalParams) IsInstant() bool {
-	return p.Start.Equal(p.End) && p.Step == 0
+	return p.Start.Equal(p.End) || p.Step == 0
 }
 
 // Direction describe log ordering.
@@ -86,6 +86,18 @@ type PipelineNode interface {
 type SampleNode interface {
 	Node
 	EvalSample(ctx context.Context, params EvalParams) (SampleIterator, error)
+}
+
+// BucketedSampleNode is an optional capability of [SampleNode] implementations
+// that can push range-aggregation step-bucketing (e.g. for
+// sum by(...) (count_over_time(...))) down into the storage layer, instead of
+// streaming raw samples for [RangeAggregation] to bucket in Go.
+type BucketedSampleNode interface {
+	// EvalBucketedSample evaluates the node, returning one Step per output
+	// step in [params.Start, params.End) spaced params.Step apart, each
+	// aggregating samples whose timestamp falls within the trailing window
+	// of length window ending at that step.
+	EvalBucketedSample(ctx context.Context, params EvalParams, window time.Duration) (StepIterator, error)
 }
 
 // MetricParams defines [MetricNode] parameters.

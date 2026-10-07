@@ -2,11 +2,12 @@ package chstorage
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/ClickHouse/ch-go"
 	"github.com/ClickHouse/ch-go/proto"
 	"github.com/go-faster/errors"
 	"github.com/go-faster/sdk/zctx"
@@ -16,16 +17,25 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
-	"github.com/go-faster/oteldb/internal/chstorage/chsql"
-	"github.com/go-faster/oteldb/internal/iterators"
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlabels"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlmetric"
-	"github.com/go-faster/oteldb/internal/logstorage"
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/chstorage/chsql"
+	"github.com/oteldb/oteldb/internal/iterators"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlabels"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlmetric"
+	"github.com/oteldb/oteldb/internal/logstorage"
+	"github.com/oteldb/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/xregexp"
+	"github.com/oteldb/oteldb/internal/xspan"
 )
+
+// ErrLogsTooManySamples means that a LogQL sample query (e.g. count_over_time,
+// rate, bytes_over_time) matched more log rows than allowed.
+var ErrLogsTooManySamples = errors.New("too many log lines requested for sampling")
+
+// ErrLogsResultTooLarge means that ClickHouse aborted a sample query because
+// its result exceeded the configured byte limit.
+var ErrLogsResultTooLarge = errors.New("sample query result is too large")
 
 // LogsQuery defines a logs query.
 type LogsQuery[E any] struct {
@@ -55,10 +65,7 @@ func (v *LogsQuery[E]) Execute(ctx context.Context, q *Querier) (_ iterators.Ite
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	mapping, err := q.getLabelMapping(ctx, v.Sel.mappingLabels())
@@ -70,7 +77,7 @@ func (v *LogsQuery[E]) Execute(ctx context.Context, q *Querier) (_ iterators.Ite
 		out   = newLogColumns()
 		query = chsql.Select(table, out.ChsqlResult()...).
 			Where(
-				chsql.InTimeRange("timestamp", v.Start, v.End),
+				chsql.InTimeRange("timestamp", v.Start, v.End, out.timestamp.Precision),
 			)
 	)
 	v.Sel.addPredicates(ctx, query, mapping, q)
@@ -83,7 +90,20 @@ func (v *LogsQuery[E]) Execute(ctx context.Context, q *Querier) (_ iterators.Ite
 	default:
 		return nil, errors.Errorf("unexpected direction %q", d)
 	}
-	query.Limit(v.Limit)
+	// A non-positive Limit means "unlimited" — used only by sample/range
+	// aggregations (count_over_time, rate, bytes_over_time, etc.) that fetch
+	// raw log lines to compute samples from, rather than a user-facing log
+	// listing request (the Loki API always supplies a positive default
+	// limit for those). Guard that case with the same safety cap used for
+	// SampleQuery, since it's just as susceptible to unbounded buffering.
+	unlimited := v.Limit <= 0
+	if unlimited {
+		if limit := q.sampleRowsLimit; limit > 0 {
+			query.Limit(limit + 1)
+		}
+	} else {
+		query.Limit(v.Limit)
+	}
 
 	var data []E
 	if err := q.do(ctx, selectQuery{
@@ -99,11 +119,33 @@ func (v *LogsQuery[E]) Execute(ctx context.Context, q *Querier) (_ iterators.Ite
 			})
 		},
 
+		MaxResultBytes: func() int {
+			if unlimited {
+				return q.sampleResultBytesLimit
+			}
+			return 0
+		}(),
+
 		Type:   "QueryLogs",
 		Signal: "logs",
 		Table:  table,
 	}); err != nil {
+		if exp, ok := ch.AsException(err); ok && exp.Code == proto.ErrTooManyRowsOrBytes {
+			return nil, errors.Wrap(ErrLogsResultTooLarge, exp.Message)
+		}
 		return nil, err
+	}
+
+	// Enforce the sample-rows cap after the result has been fully drained. The
+	// query applies a server-side LIMIT of limit+1, so observing limit+1 rows
+	// means the source data exceeded the cap. We deliberately check here rather
+	// than aborting from within OnResult: returning an error mid-stream leaves
+	// the pooled ClickHouse connection partially read, which can corrupt a
+	// subsequent query that reuses that connection.
+	if unlimited {
+		if limit := q.sampleRowsLimit; limit > 0 && len(data) > limit {
+			return nil, errors.Wrapf(ErrLogsTooManySamples, "%d > %d rows", len(data), limit)
+		}
 	}
 
 	return iterators.Slice(data), nil
@@ -132,6 +174,44 @@ func (c *sampleQueryColumns) Result() proto.Results {
 	}
 }
 
+var severityMapExpr = func() chsql.Expr {
+	var entries []chsql.Expr
+	for _, n := range []plog.SeverityNumber{
+		plog.SeverityNumberTrace,
+		plog.SeverityNumberTrace2,
+		plog.SeverityNumberTrace3,
+		plog.SeverityNumberTrace4,
+		plog.SeverityNumberDebug,
+		plog.SeverityNumberDebug2,
+		plog.SeverityNumberDebug3,
+		plog.SeverityNumberDebug4,
+		plog.SeverityNumberInfo,
+		plog.SeverityNumberInfo2,
+		plog.SeverityNumberInfo3,
+		plog.SeverityNumberInfo4,
+		plog.SeverityNumberWarn,
+		plog.SeverityNumberWarn2,
+		plog.SeverityNumberWarn3,
+		plog.SeverityNumberWarn4,
+		plog.SeverityNumberError,
+		plog.SeverityNumberError2,
+		plog.SeverityNumberError3,
+		plog.SeverityNumberError4,
+		plog.SeverityNumberFatal,
+		plog.SeverityNumberFatal2,
+		plog.SeverityNumberFatal3,
+		plog.SeverityNumberFatal4,
+	} {
+		entries = append(entries, chsql.Integer(int(n)), chsql.String(n.String()))
+	}
+	// Put unspecified as empty string.
+	entries = append(entries,
+		chsql.Integer(int(plog.SeverityNumberUnspecified)),
+		chsql.String(""),
+	)
+	return chsql.Map(entries...)
+}()
+
 // Execute executes the query using given querier.
 func (v *SampleQuery) Execute(ctx context.Context, q *Querier) (_ logqlengine.SampleIterator, rerr error) {
 	table := q.tables.Logs
@@ -150,10 +230,7 @@ func (v *SampleQuery) Execute(ctx context.Context, q *Querier) (_ logqlengine.Sa
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	// Gather all labels for mapping fetch.
@@ -173,20 +250,10 @@ func (v *SampleQuery) Execute(ctx context.Context, q *Querier) (_ logqlengine.Sa
 
 	entries := make([]chsql.Expr, 0, len(v.GroupingLabels)*2)
 	for _, key := range v.GroupingLabels {
-		label := string(key)
-		if key, ok := mapping[label]; ok {
-			label = key
-		}
-
-		labelExpr, ok := q.getMaterializedLabelColumn(label)
-		if !ok {
-			labelExpr = firstAttrSelector(label)
-		}
-
 		entries = append(entries,
 			chsql.String(string(key)),
 			// Ensure `LowCardinality` column type.
-			chsql.Cast(labelExpr, "LowCardinality(String)"),
+			chsql.Cast(q.resolveGroupingLabelExpr(key, mapping), "LowCardinality(String)"),
 		)
 	}
 
@@ -213,11 +280,16 @@ func (v *SampleQuery) Execute(ctx context.Context, q *Querier) (_ logqlengine.Sa
 				Data: columns.Labels,
 			},
 		).Where(
-			chsql.InTimeRange("timestamp", v.Start, v.End),
+			chsql.InTimeRange("timestamp", v.Start, v.End, columns.Timestamp.Precision),
 		)
 	)
 	v.Sel.addPredicates(ctx, query, mapping, q)
 	query.Order(chsql.Ident("timestamp"), chsql.Asc)
+	if limit := q.sampleRowsLimit; limit > 0 {
+		// Fetch one extra row so we can tell "exactly at the limit" apart
+		// from "more rows than the limit".
+		query.Limit(limit + 1)
+	}
 
 	var result []logqlmetric.SampledEntry
 	if err := q.do(ctx, selectQuery{
@@ -226,23 +298,234 @@ func (v *SampleQuery) Execute(ctx context.Context, q *Querier) (_ logqlengine.Sa
 			for i := 0; i < columns.Timestamp.Rows(); i++ {
 				timestamp := columns.Timestamp.Row(i)
 				sample := columns.Sample.Row(i)
-				// FIXME(tdakkota): allocates unnecessary map.
-				labels := columns.Labels.Row(i)
+				labels := columns.Labels.RowRange(i)
 
 				result = append(result, logqlmetric.SampledEntry{
 					Timestamp: pcommon.NewTimestampFromTime(timestamp),
 					Sample:    sample,
-					Set:       logqlabels.AggregatedLabelsFromMap(labels),
+					Set:       logqlabels.AggregatedLabelsFromSeq(labels),
 				})
 			}
 			return nil
 		},
 
+		MaxResultBytes: q.sampleResultBytesLimit,
+
 		Type:   "QuerySamples",
 		Signal: "logs",
 		Table:  table,
 	}); err != nil {
+		if exp, ok := ch.AsException(err); ok && exp.Code == proto.ErrTooManyRowsOrBytes {
+			return nil, errors.Wrap(ErrLogsResultTooLarge, exp.Message)
+		}
 		return nil, err
+	}
+
+	// Enforce the sample-rows cap after the result has been fully drained. The
+	// query applies a server-side LIMIT of limit+1, so observing limit+1 rows
+	// means the source data exceeded the cap. We deliberately check here rather
+	// than aborting from within OnResult: returning an error mid-stream leaves
+	// the pooled ClickHouse connection partially read, which can corrupt a
+	// subsequent query that reuses that connection.
+	if limit := q.sampleRowsLimit; limit > 0 && len(result) > limit {
+		return nil, errors.Wrapf(ErrLogsTooManySamples, "%d > %d rows", len(result), limit)
+	}
+
+	return iterators.Slice(result), nil
+}
+
+// resolveGroupingLabelExpr returns the ClickHouse expression that evaluates
+// a single grouping label's value for a log row.
+func (q *Querier) resolveGroupingLabelExpr(label logql.Label, mapping map[string]string) chsql.Expr {
+	name := string(label)
+	if key, ok := mapping[name]; ok {
+		name = key
+	}
+
+	switch name {
+	case logstorage.LabelSeverity, logstorage.LabelDetectedLevel:
+		return chsql.ArrayElement(
+			severityMapExpr,
+			chsql.Ident("severity_number"),
+		)
+	default:
+		if expr, ok := q.getMaterializedLabelColumn(name); ok {
+			return expr
+		}
+		return firstAttrSelector(name)
+	}
+}
+
+// BucketedSampleQuery defines a sample query that aggregates samples per
+// output step directly in ClickHouse, instead of fetching one row per raw
+// log line for [logqlmetric.RangeAggregation] (range_agg.go) to bucket in
+// Go. It implements the same step-bucketing math as the PromQL
+// rate/increase/delta offload (see querier_metrics_rate.go and
+// chsql_stepfanout.go), without the counter-reset detection tier rate needs
+// — log sample values (line counts, byte lengths) are not counters.
+type BucketedSampleQuery struct {
+	// Start, End define the output step range.
+	Start, End time.Time
+	// Step is the output resolution. If <= 0 (instant query), a single
+	// bucket covering (End-Range, End] is produced.
+	Step time.Duration
+	// Range is the range-aggregation window, e.g. the `[5m]` in
+	// count_over_time({...}[5m]).
+	Range time.Duration
+	Sel   LogsSelector
+
+	Sampling SamplingOp
+	// GroupingLabels must be non-empty: this query only makes sense for the
+	// sum/avg/min/max by(...) (...) shape the optimizer already requires
+	// before offloading to it (see querier_logs_optimizer.go).
+	GroupingLabels []logql.Label
+}
+
+// Execute executes the query using given querier.
+func (v *BucketedSampleQuery) Execute(ctx context.Context, q *Querier) (_ logqlmetric.StepIterator, rerr error) {
+	table := q.tables.Logs
+
+	ctx, span := q.tracer.Start(ctx, "chstorage.logs.BucketedSampleQuery.Eval",
+		trace.WithAttributes(
+			xattribute.UnixNano("logql.range.start", v.Start),
+			xattribute.UnixNano("logql.range.end", v.End),
+			xattribute.Duration("logql.step", v.Step),
+			xattribute.Duration("logql.window", v.Range),
+			attribute.String("logql.sampling", v.Sampling.String()),
+			xattribute.StringerSlice("logql.grouping_labels", v.GroupingLabels),
+			xattribute.StringerSlice("logql.label_matchers", v.Sel.Labels),
+			xattribute.StringerSlice("logql.line_matchers", v.Sel.Line),
+			xattribute.StringerSlice("logql.label_predicates", v.Sel.PipelineLabels),
+
+			attribute.String("chstorage.table", table),
+		),
+	)
+	defer func() {
+		xspan.End(span, rerr)
+	}()
+
+	if v.Range <= 0 {
+		return nil, errors.New("bucketed sample query requires a positive range")
+	}
+	if len(v.GroupingLabels) == 0 {
+		return nil, errors.New("bucketed sample query requires non-empty grouping labels")
+	}
+
+	step := v.Step
+	if step <= 0 {
+		step = v.Range
+	}
+
+	labels := v.Sel.mappingLabels()
+	for _, l := range v.GroupingLabels {
+		labels = append(labels, string(l))
+	}
+	mapping, err := q.getLabelMapping(ctx, labels)
+	if err != nil {
+		return nil, errors.Wrap(err, "get label mapping")
+	}
+
+	sampleExpr, err := getSampleExpr(v.Sampling)
+	if err != nil {
+		return nil, err
+	}
+
+	labelAliases := make([]string, len(v.GroupingLabels))
+	fanoutColumns := make([]chsql.ResultColumn, 0, 2+len(v.GroupingLabels))
+	fanoutColumns = append(fanoutColumns,
+		chsql.ResultColumn{Name: "sample", Expr: chsql.ToFloat64(sampleExpr)},
+		chsql.ResultColumn{Name: "step_ms_val", Expr: stepFanoutExpr},
+	)
+	for i, key := range v.GroupingLabels {
+		alias := fmt.Sprintf("g%d", i)
+		labelAliases[i] = alias
+		fanoutColumns = append(fanoutColumns, chsql.ResultColumn{
+			Name: alias,
+			Expr: chsql.Cast(q.resolveGroupingLabelExpr(key, mapping), "LowCardinality(String)"),
+		})
+	}
+
+	// Subquery 1: fan out each matched log row into every output step whose
+	// trailing window (step-window, step] covers its timestamp — identical
+	// math to the PromQL rate offload's fan-out tier (chsql_stepfanout.go).
+	expanded := chsql.Select(table, fanoutColumns...)
+	expanded = applyStepFanoutCTEs(expanded, v.Start, v.End, step, v.Range, 0, "timestamp")
+	expanded = expanded.Where(
+		chsql.InTimeRange("timestamp", v.Start.Add(-v.Range), v.End, proto.PrecisionNano),
+	)
+	v.Sel.addPredicates(ctx, expanded, mapping, q)
+
+	// Subquery 2: aggregate per (step, grouping labels). This is the whole
+	// point — ClickHouse returns one row per output point, not one row per
+	// raw log line.
+	groupBy := make([]chsql.Expr, 0, 1+len(labelAliases))
+	groupBy = append(groupBy, chsql.Ident("step_ms_val"))
+
+	var (
+		stepMSCol proto.ColInt64
+		totalCol  proto.ColFloat64
+		labelCols = make([]*proto.ColLowCardinality[string], len(labelAliases))
+	)
+	finalColumns := make([]chsql.ResultColumn, 0, 2+len(labelAliases))
+	finalColumns = append(finalColumns, chsql.Column("step_ms_val", &stepMSCol))
+	for i, alias := range labelAliases {
+		col := new(proto.ColStr).LowCardinality()
+		labelCols[i] = col
+		groupBy = append(groupBy, chsql.Ident(alias))
+		finalColumns = append(finalColumns, chsql.Column(alias, col))
+	}
+	finalColumns = append(finalColumns, chsql.ResultColumn{
+		Name: "total",
+		Expr: chsql.Sum(chsql.Ident("sample")),
+		Data: &totalCol,
+	})
+
+	query := chsql.SelectFrom(expanded, finalColumns...).GroupBy(groupBy...)
+
+	buckets := make(map[int64][]logqlmetric.Sample)
+	if err := q.do(ctx, selectQuery{
+		Query: query,
+		OnResult: func(ctx context.Context, block proto.Block) error {
+			for i := 0; i < stepMSCol.Rows(); i++ {
+				stepMS := stepMSCol.Row(i)
+
+				values := make(map[string]string, len(v.GroupingLabels))
+				for j, key := range v.GroupingLabels {
+					values[string(key)] = labelCols[j].Row(i)
+				}
+
+				buckets[stepMS] = append(buckets[stepMS], logqlmetric.Sample{
+					Data: totalCol.Row(i),
+					Set:  logqlabels.AggregatedLabelsFromMap(values),
+				})
+			}
+			return nil
+		},
+
+		MaxResultBytes: q.sampleResultBytesLimit,
+
+		Type:   "QueryBucketedSamples",
+		Signal: "logs",
+		Table:  table,
+	}); err != nil {
+		if exp, ok := ch.AsException(err); ok && exp.Code == proto.ErrTooManyRowsOrBytes {
+			return nil, errors.Wrap(ErrLogsResultTooLarge, exp.Message)
+		}
+		return nil, err
+	}
+
+	stepsMS := make([]int64, 0, len(buckets))
+	for ms := range buckets {
+		stepsMS = append(stepsMS, ms)
+	}
+	slices.Sort(stepsMS)
+
+	result := make([]logqlmetric.Step, 0, len(stepsMS))
+	for _, ms := range stepsMS {
+		result = append(result, logqlmetric.Step{
+			Timestamp: pcommon.NewTimestampFromTime(time.UnixMilli(ms)),
+			Samples:   buckets[ms],
+		})
 	}
 
 	return iterators.Slice(result), nil
@@ -371,42 +654,23 @@ func (q *Querier) lineFilter(m logql.LineFilter, c *tokenCollector) (e chsql.Exp
 	matcher := func(op logql.BinOp, by logql.LineFilterValue) chsql.Expr {
 		switch op {
 		case logql.OpEq, logql.OpNotEq:
-			expr := chsql.Contains("body", by.Value)
-
-			{
-				// HACK: check for special case of hex-encoded trace_id and span_id.
-				// Like `{http_method=~".+"} |= "af36000000000000c517000000000003"`.
-				// TODO(ernado): also handle regex?
-				v, _ := hex.DecodeString(by.Value)
-				switch len(v) {
-				case len(otelstorage.TraceID{}):
-					expr = chsql.Or(expr, chsql.Eq(
-						chsql.Ident("trace_id"),
-						chsql.Unhex(chsql.String(by.Value)),
-					))
-				case len(otelstorage.SpanID{}):
-					expr = chsql.Or(expr, chsql.Eq(
-						chsql.Ident("span_id"),
-						chsql.Unhex(chsql.String(by.Value)),
-					))
-				default:
-					// In case if value is not a trace_id/span_id.
-					//
-					// Clickhouse does not use tokenbf_v1 index to skip blocks
-					// with position* functions for some reason.
-					//
-					// Force to skip using hasToken function.
-					//
-					// Note that such optimization is applied only if operation is not negated to
-					// avoid false-negative skipping.
-					if val := by.Value; len(m.Or) == 0 && op != logql.OpNotEq {
-						c.Add(val)
-					}
+			if val := by.Value; len(m.Or) == 0 && op != logql.OpNotEq {
+				// `|=` is a substring match, so the value's edge tokens may be fragments of a
+				// larger token in the body (`|= "error"` matches "myerror"); adding them as
+				// hasToken skip-index prefilters would wrongly prune real matches. Keep only the
+				// interior whole tokens.
+				c.Add(chsql.SkipFirstLastToken(val))
+			}
+			return chsql.Contains("body", by.Value)
+		case logql.OpRe, logql.OpNotRe:
+			if len(m.Or) == 0 && op != logql.OpNotRe && !by.IP {
+				// Extract the literals a match must contain and add them as hasToken skip-index
+				// prefilters, pruning parts whose bloom lacks a required token. SkipFirstLastToken
+				// keeps only whole tokens, since the pattern is an unanchored substring match.
+				for _, lit := range xregexp.Literals(by.Value) {
+					c.Add(chsql.SkipFirstLastToken(lit))
 				}
 			}
-
-			return expr
-		case logql.OpRe, logql.OpNotRe:
 			return chsql.Match(chsql.Ident("body"), chsql.String(by.Value))
 		default:
 			panic(fmt.Sprintf("unexpected line matcher op %v", m.Op))
@@ -486,7 +750,7 @@ func (q *Querier) logQLLabelMatcher(
 	}
 
 	switch labelName {
-	case logstorage.LabelSeverity:
+	case logstorage.LabelSeverity, logstorage.LabelDetectedLevel:
 		switch m.Op {
 		case logql.OpEq, logql.OpNotEq:
 			// Direct comparison with severity number.
@@ -501,15 +765,12 @@ func (q *Querier) logQLLabelMatcher(
 		case logql.OpRe, logql.OpNotRe:
 			matches := make([]int, 0, 6)
 			for i := plog.SeverityNumberUnspecified; i <= plog.SeverityNumberFatal4; i++ {
-				for _, s := range []string{
+				if slices.ContainsFunc([]string{
 					i.String(),
 					strings.ToLower(i.String()),
 					strings.ToUpper(i.String()),
-				} {
-					if m.Re.MatchString(s) {
-						matches = append(matches, int(i))
-						break
-					}
+				}, m.Re.MatchString) {
+					matches = append(matches, int(i))
 				}
 			}
 			return chsql.In(chsql.Ident("severity_number"), chsql.TupleValues(matches...))
@@ -541,37 +802,37 @@ func (q *Querier) logQLLabelMatcher(
 			}
 		}
 
-		exprs := make([]chsql.Expr, 0, 3)
-		keysExprs := make([]chsql.Expr, 0, cap(exprs))
+		// TODO: how to match integers, booleans, floats, arrays?
+		var (
+			selector = firstAttrSelector(labelName)
+			sub      chsql.Expr
+		)
+		switch m.Op {
+		case logql.OpEq, logql.OpNotEq:
+			sub = chsql.Eq(selector, chsql.String(m.Value))
+		case logql.OpRe, logql.OpNotRe:
+			sub = chsql.Match(selector, chsql.String(m.Value))
+		default:
+			panic(fmt.Sprintf("unexpected label matcher op %v", m.Op))
+		}
+
+		keysExprs := make([]chsql.Expr, 0, 3)
 		// Search in all attributes.
 		for _, column := range []string{
 			colAttrs,
 			colScope,
 			colResource,
 		} {
-			// TODO: how to match integers, booleans, floats, arrays?
-			var (
-				selector = attrSelector(column, labelName)
-				sub      chsql.Expr
-			)
-			switch m.Op {
-			case logql.OpEq, logql.OpNotEq:
-				sub = chsql.Eq(selector, chsql.String(m.Value))
-			case logql.OpRe, logql.OpNotRe:
-				sub = chsql.Match(selector, chsql.String(m.Value))
-			default:
-				panic(fmt.Sprintf("unexpected label matcher op %v", m.Op))
-			}
-			exprs = append(exprs, sub)
 			keysExprs = append(keysExprs, chsql.JSONExtractKeys(chsql.Ident(column)))
 		}
+
 		// Force Clickhouse to use index.
 		return chsql.And(
 			chsql.Has(
 				chsql.ArrayConcat(keysExprs...),
 				chsql.String(labelName),
 			),
-			chsql.JoinOr(exprs...),
+			sub,
 		)
 	}
 }

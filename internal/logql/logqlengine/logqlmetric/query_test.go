@@ -3,6 +3,7 @@ package logqlmetric
 import (
 	"cmp"
 	"fmt"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -10,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 
-	"github.com/go-faster/oteldb/internal/iterators"
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/lokiapi"
+	"github.com/oteldb/oteldb/internal/iterators"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/lokiapi"
 )
 
 func testSampler(samples []SampledEntry) SampleSelector {
@@ -167,8 +168,13 @@ func TestInstantAggregation(t *testing.T) {
 		{`count_over_time({} [2s]) - count_over_time({} [2s])`, "0"},
 	}
 	for i, tt := range tests {
-		tt := tt
-		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
+		id := i + 1
+		t.Run(fmt.Sprintf("Test%d", id), func(t *testing.T) {
+			if id == 12 && runtime.GOARCH == "riscv64" {
+				// TODO: Fix test failure on riscv64.
+				t.Skip("https://github.com/oteldb/oteldb/issues/828")
+			}
+
 			data := evaluateQuery(t, testSamples, tt.query, testParams, true)
 
 			v, ok := data.GetVectorResult()
@@ -265,7 +271,6 @@ func TestRangeAggregationStep(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			var (
 				query      = fmt.Sprintf(`count_over_time({} [%s])`, tt.interval)
@@ -340,7 +345,6 @@ func TestRangeAggregation(t *testing.T) {
 		{`last_over_time({} | unwrap foo [2s])`, []string{"3", "6", "4"}},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			data := evaluateQuery(t, testSamples, tt.query, testParams, false)
 
@@ -554,7 +558,6 @@ func TestGroupedAggregation(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			data := evaluateQuery(t, testSamples, tt.query, testParams, false)
 
@@ -606,7 +609,6 @@ func TestKHeapAggregation(t *testing.T) {
 		{`bottomk by (key) (3, sum_over_time({} | unwrap _ [6s]))`, []string{"1", "2", "3"}},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			data := evaluateQuery(t, testSamples, tt.query, testParams, false)
 

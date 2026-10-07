@@ -10,8 +10,8 @@ import (
 type Handler interface {
 	// BuildInfo implements buildInfo operation.
 	//
-	// Returns Tempo buildinfo, in the same format as Prometheus `/api/v1/status/buildinfo`.
-	// Used by Grafana to check Tempo API version.
+	// Returns Tempo buildinfo, in the same format as Prometheus `/api/v1/status/buildinfo`. Used by
+	// Grafana to check Tempo API version.
 	//
 	// GET /api/status/buildinfo
 	BuildInfo(ctx context.Context) (*PrometheusVersion, error)
@@ -21,6 +21,19 @@ type Handler interface {
 	//
 	// GET /api/echo
 	Echo(ctx context.Context) (EchoOK, error)
+	// Query implements query operation.
+	//
+	// The instant version of the Metrics API is similar to the range version, but instead returns a single
+	// value for the query.
+	//
+	// GET /api/metrics/query
+	Query(ctx context.Context, params QueryParams) (*InstantMetrics, error)
+	// QueryRange implements queryRange operation.
+	//
+	// This endpoint returns Prometheus-like time-series for a given metrics query.
+	//
+	// GET /api/metrics/query_range
+	QueryRange(ctx context.Context, params QueryRangeParams) (*RangeMetrics, error)
 	// Search implements search operation.
 	//
 	// Execute TraceQL query.
@@ -35,8 +48,7 @@ type Handler interface {
 	SearchTagValues(ctx context.Context, params SearchTagValuesParams) (*TagValues, error)
 	// SearchTagValuesV2 implements searchTagValuesV2 operation.
 	//
-	// This endpoint retrieves all discovered values and their data types for the given TraceQL
-	// identifier.
+	// This endpoint retrieves all discovered values and their data types for the given TraceQL identifier.
 	//
 	// GET /api/v2/search/tag/{attribute_selector}/values
 	SearchTagValuesV2(ctx context.Context, params SearchTagValuesV2Params) (*TagValuesV2, error)
@@ -58,6 +70,12 @@ type Handler interface {
 	//
 	// GET /api/traces/{traceID}
 	TraceByID(ctx context.Context, params TraceByIDParams) (TraceByIDRes, error)
+	// TraceByIDv2 implements traceByIDv2 operation.
+	//
+	// Querying traces by id.
+	//
+	// GET /api/v2/traces/{traceID}
+	TraceByIDv2(ctx context.Context, params TraceByIDv2Params) (TraceByIDv2Res, error)
 	// NewError creates *ErrorStatusCode from error returned by handler.
 	//
 	// Used for common default response.

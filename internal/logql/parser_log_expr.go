@@ -1,6 +1,6 @@
 package logql
 
-import "github.com/go-faster/oteldb/internal/logql/lexer"
+import "github.com/oteldb/oteldb/internal/logql/lexer"
 
 func (p *parser) parseLogExpr() (e *LogExpr, err error) {
 	e = new(LogExpr)
@@ -56,9 +56,20 @@ func (p *parser) parseSelector() (s Selector, err error) {
 }
 
 func (p *parser) parseLabelMatcher() (m LabelMatcher, err error) {
-	m.Label, err = p.parseIdent()
-	if err != nil {
-		return m, err
+	t := p.peek()
+
+	switch t.Type {
+	case lexer.Ident:
+		m.Label, err = p.parseIdent()
+		if err != nil {
+			return m, err
+		}
+	case lexer.String:
+		v, err := p.parseString()
+		if err != nil {
+			return m, err
+		}
+		m.Label = Label(v)
 	}
 
 	switch t := p.next(); t.Type {

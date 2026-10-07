@@ -5,7 +5,9 @@ volumes:
 
 services:
   clickhouse:
-    image: "ghcr.io/go-faster/clickhouse-server:23.12"
+    image: "clickhouse/clickhouse-server:25.9"
+    environment:
+      - CLICKHOUSE_PASSWORD=default
     ports:
       - "9000:9000"
       - "8123:8123"
@@ -19,12 +21,16 @@ services:
 
   # Exports traces from clickhouse internal table to otel.
   chotel:
-    image: ghcr.io/go-faster/oteldb/chotel
+    image: ghcr.io/oteldb/oteldb/chotel
     build:
       context: ../../../
-      dockerfile: chotel.Dockerfile
+      dockerfile: dev/Dockerfile
+      args:
+        TARGETS: chotel
+        ENTRYPOINT_BIN: chotel
     restart: always
     environment:
+      - CH_DSN=clickhouse://default:default@clickhouse:9000
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       - OTEL_EXPORTER_OTLP_INSECURE=true
@@ -35,10 +41,13 @@ services:
       - clickhouse
 
   client:
-    image: ghcr.io/go-faster/oteldb/oteldemo
+    image: ghcr.io/oteldb/oteldb/oteldemo
     build:
       context: ../../../
-      dockerfile: oteldemo.Dockerfile
+      dockerfile: dev/Dockerfile
+      args:
+        TARGETS: oteldemo
+        ENTRYPOINT_BIN: oteldemo
     restart: always
     command: ["client"]
     environment:
@@ -50,12 +59,17 @@ services:
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
       - OTEL_RESOURCE_ATTRIBUTES=service.name=client
+      - OTEL_METRIC_EXPORT_INTERVAL=5000
+
   server:
-    image: ghcr.io/go-faster/oteldb/oteldemo
+    image: ghcr.io/oteldb/oteldb/oteldemo
     command: ["server"]
     build:
       context: ../../../
-      dockerfile: oteldemo.Dockerfile
+      dockerfile: dev/Dockerfile
+      args:
+        TARGETS: oteldemo
+        ENTRYPOINT_BIN: oteldemo
     restart: always
     environment:
       - OTEL_LOG_LEVEL=debug
@@ -66,15 +80,16 @@ services:
       - OTEL_EXPORTER_OTLP_INSECURE=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
       - OTEL_RESOURCE_ATTRIBUTES=service.name=server
+      - OTEL_METRIC_EXPORT_INTERVAL=5000
 
   oteldb:
-    image: ghcr.io/go-faster/oteldb
+    image: ghcr.io/oteldb/oteldb
     build:
       context: ../../../
-      dockerfile: Dockerfile
+      dockerfile: dev/Dockerfile
     environment:
       - OTELDB_STORAGE=ch
-      - CH_DSN=clickhouse://clickhouse:9000
+      - CH_DSN=clickhouse://default:default@clickhouse:9000
       - OTEL_LOG_LEVEL=info
       - OTEL_METRICS_EXPORTER=otlp
       - OTEL_LOGS_EXPORTER=otlp
@@ -83,28 +98,30 @@ services:
       - OTEL_EXPORTER_OTLP_INSECURE=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
       - OTEL_RESOURCE_ATTRIBUTES=service.name=oteldb
+      - OTEL_METRIC_EXPORT_INTERVAL=5000
+    command:
+      - --config=/etc/oteldb/cfg.yml
     ports:
-      - "9090:9090" # prometheus API
+      - "8090:8090" # admin panel (single node, so one port is the whole picture)
+    volumes:
+      - ./oteldb.yml:/etc/oteldb/cfg.yml:ro
+      - ./server.crt:/etc/oteldb/server.crt:ro
+      - ./server.key:/etc/oteldb/server.key:ro
     depends_on:
       - clickhouse
 
   # https://opentelemetry.io/docs/collector/installation/#docker-compose
   otelcol:
-    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.89.0
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.143.0
+    environment:
+      - OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=none
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
     volumes:
-      - ./otelcol.yml:/etc/otelcol-contrib/config.yaml
+      - ./otelcol.yml:/etc/otelcol-contrib/config.yaml:ro
+      - ./server.crt:/etc/otelcol-contrib/server.crt:ro
     depends_on:
       - oteldb
-    environment:
-      # probably excessive
-      - OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc
-      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otelcol:4317
-    command:
-      - "--config"
-      - "/etc/otelcol-contrib/config.yaml"
-      #  https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/observability.md#how-we-expose-telemetry
-      - "--feature-gates=telemetry.useOtelForInternalMetrics"
-      - "--feature-gates=telemetry.useOtelWithSDKConfigurationForInternalTelemetry"
 
   node-exporter:
     image: prom/node-exporter
@@ -122,7 +139,7 @@ services:
       - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
 
   grafana:
-    image: "ghcr.io/go-faster/grafana:11.5.0-pre"
+    image: "grafana/grafana-oss:12.1.1"
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin

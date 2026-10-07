@@ -8,7 +8,7 @@ import (
 	"text/scanner"
 	"unicode"
 
-	"github.com/go-faster/oteldb/internal/lexerql"
+	"github.com/oteldb/oteldb/internal/lexerql"
 )
 
 type lexer struct {
@@ -60,7 +60,9 @@ func (l *lexer) setError(msg string, pos scanner.Position) {
 func (l *lexer) nextToken(r rune, text string) (tok Token, _ bool) {
 	tok.Pos = l.scanner.Position
 	if r == '-' {
-		if peekCh := l.scanner.Peek(); lexerql.IsDigit(peekCh) || peekCh == '.' {
+		// NOTE: do not peek '.' here: "-.a" is a negated attribute selector,
+		// not a number. Fractions like "-.5" are lexed as [Sub, Number].
+		if peekCh := l.scanner.Peek(); lexerql.IsDigit(peekCh) {
 			r = l.scanner.Scan()
 			text = "-" + l.scanner.TokenText()
 		}
@@ -115,39 +117,141 @@ func (l *lexer) nextToken(r rune, text string) (tok Token, _ bool) {
 		}
 		// "parent" followed by dot, it's attribute selector.
 		fallthrough
-	case ".", "resource", "span":
-		// Attribute selector.
-		var sb strings.Builder
-		sb.WriteString(text)
-
-		ch := peekCh
-		for isAttributeRune(ch) {
-			sb.WriteRune(l.scanner.Next())
-			ch = l.scanner.Peek()
+	case ".":
+		return l.attributeToken(tok, text, peekCh)
+	case "resource":
+		if peekCh == '.' {
+			return l.attributeToken(tok, text, peekCh)
 		}
-
-		tok.Type = Ident
-		tok.Text = sb.String()
-		return tok, true
+	case "span":
+		switch peekCh {
+		case '.':
+			return l.attributeToken(tok, text, peekCh)
+		case ':':
+			l.scanner.Next()
+			tok.Type = SpanColon
+			tok.Text = "span:"
+			return tok, true
+		}
+	case "trace":
+		if peekCh == ':' {
+			l.scanner.Next()
+			tok.Type = TraceColon
+			tok.Text = "trace:"
+			return tok, true
+		}
+	case "event":
+		switch peekCh {
+		case '.':
+			return l.attributeToken(tok, text, peekCh)
+		case ':':
+			l.scanner.Next()
+			tok.Type = EventColon
+			tok.Text = "event:"
+			return tok, true
+		}
+	case "link":
+		switch peekCh {
+		case '.':
+			return l.attributeToken(tok, text, peekCh)
+		case ':':
+			l.scanner.Next()
+			tok.Type = LinkColon
+			tok.Text = "link:"
+			return tok, true
+		}
+	case "instrumentation":
+		switch peekCh {
+		case '.':
+			return l.attributeToken(tok, text, peekCh)
+		case ':':
+			l.scanner.Next()
+			tok.Type = InstrumentationColon
+			tok.Text = "instrumentation:"
+			return tok, true
+		}
 	}
-	peeked := text + string(peekCh)
-
-	tt, ok := tokens[peeked]
-	if ok {
-		tok.Type = tt
-		tok.Text = peeked
+	// Greedily consume the longest known operator, e.g. "!" -> "!>" -> "!>>".
+	//
+	// Only extend while the result is still a known token, so a partial match
+	// never consumes runes belonging to the next token.
+	longest := text
+	tt, ok := tokens[text]
+	for {
+		candidate := longest + string(l.scanner.Peek())
+		ct, cok := tokens[candidate]
+		if !cok {
+			break
+		}
 		l.scanner.Next()
-		return tok, true
+		longest, tt, ok = candidate, ct, true
 	}
-
-	tt, ok = tokens[text]
 	if ok {
 		tok.Type = tt
+		tok.Text = longest
 		return tok, true
 	}
 
 	tok.Type = Ident
 	return tok, true
+}
+
+// attributeToken reads an attribute selector token starting with prefix.
+func (l *lexer) attributeToken(tok Token, prefix string, peekCh rune) (Token, bool) {
+	text, ok := l.readAttributeSelector(prefix, peekCh)
+	if !ok {
+		return tok, false
+	}
+	tok.Type = Ident
+	tok.Text = text
+	return tok, true
+}
+
+// readAttributeSelector reads an attribute selector.
+//
+// Quoted parts are kept verbatim, quotes and all: the scope prefix must be cut
+// off before they can be decoded, which the parser does.
+func (l *lexer) readAttributeSelector(prefix string, peekCh rune) (string, bool) {
+	var sb strings.Builder
+	sb.WriteString(prefix)
+	for ch := peekCh; ; ch = l.scanner.Peek() {
+		switch {
+		case ch == '"':
+			if !l.readQuotedAttributePart(&sb) {
+				return "", false
+			}
+		case isAttributeRune(ch):
+			sb.WriteRune(l.scanner.Next())
+		default:
+			return sb.String(), true
+		}
+	}
+}
+
+// readQuotedAttributePart reads a quoted part of an attribute selector, so that
+// a name may contain runes that would otherwise end the selector.
+func (l *lexer) readQuotedAttributePart(sb *strings.Builder) bool {
+	// Consume the opening quote.
+	sb.WriteRune(l.scanner.Next())
+	for {
+		switch ch := l.scanner.Peek(); ch {
+		case scanner.EOF:
+			l.setError(`unexpected EOF, expecting '"'`, l.scanner.Pos())
+			return false
+		case '"':
+			sb.WriteRune(l.scanner.Next())
+			return true
+		case '\\':
+			sb.WriteRune(l.scanner.Next())
+			if esc := l.scanner.Peek(); esc != '\\' && esc != '"' {
+				l.setError("invalid escape sequence", l.scanner.Pos())
+				return false
+			}
+			sb.WriteRune(l.scanner.Next())
+		default:
+			sb.WriteRune(l.scanner.Next())
+		}
+	}
 }
 
 func isAttributeRune(r rune) bool {

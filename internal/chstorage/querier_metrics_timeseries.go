@@ -1,0 +1,386 @@
+package chstorage
+
+import (
+	"cmp"
+	"context"
+	"encoding/binary"
+	"errors"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ClickHouse/ch-go/proto"
+	singleflight "github.com/go-faster/sdk/singleflightx"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/zeebo/xxh3"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/oteldb/oteldb/internal/chstorage/chsql"
+	"github.com/oteldb/oteldb/internal/metricstorage"
+	"github.com/oteldb/oteldb/internal/promapi"
+	"github.com/oteldb/oteldb/internal/xspan"
+)
+
+type timeseriesQuerier struct {
+	tables Tables
+	do     func(ctx context.Context, s selectQuery) error
+
+	hashSg     singleflight.Group[xxh3.Uint128, metricsTimeseries]
+	metadataSg singleflight.Group[xxh3.Uint128, metricstorage.Metadata]
+
+	tracer trace.Tracer
+}
+
+func newTimeseriesQuerier(q *Querier) *timeseriesQuerier {
+	return &timeseriesQuerier{
+		tables: q.tables,
+		do:     q.do,
+		tracer: q.tracer,
+	}
+}
+
+type (
+	metricsTimeseries          = map[[16]byte]labels.Labels
+	queryMetricsTimeseriesFunc = func(ctx context.Context, start, end time.Time, matcherSets [][]*labels.Matcher) (metricsTimeseries, error)
+)
+
+func (q *timeseriesQuerier) hashMatchers(start, end time.Time, sets [][]*labels.Matcher) xxh3.Uint128 {
+	h := xxh3.New()
+	hashPrometheusMatchers(h, sets)
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, uint64(start.UnixNano()))
+	_, _ = h.Write(buf)
+	binary.LittleEndian.PutUint64(buf, uint64(end.UnixNano()))
+	_, _ = h.Write(buf)
+	return h.Sum128()
+}
+
+func hashPrometheusMatchers(h *xxh3.Hasher, sets [][]*labels.Matcher) {
+	size := 0
+	for _, set := range sets {
+		size += len(set)
+	}
+
+	type pair struct {
+		Type  labels.MatchType
+		Name  string
+		Value string
+	}
+	var pairs []pair
+	const mapStackThreshold = 16
+	if l := size; l < mapStackThreshold {
+		pairs = make([]pair, 0, mapStackThreshold)
+	} else {
+		pairs = make([]pair, 0, size)
+	}
+	for _, set := range sets {
+		for _, m := range set {
+			pairs = append(pairs, pair{
+				Type:  m.Type,
+				Name:  m.Name,
+				Value: m.Value,
+			})
+		}
+	}
+	slices.SortFunc(pairs, func(a, b pair) int {
+		if r := cmp.Compare(a.Type, b.Type); r != 0 {
+			return r
+		}
+		return cmp.Or(
+			strings.Compare(a.Name, b.Name),
+			strings.Compare(a.Value, b.Value),
+		)
+	})
+
+	for _, p := range pairs {
+		_, _ = h.Write([]byte{byte(p.Type)})
+		_, _ = h.WriteString(p.Name)
+		_, _ = h.WriteString(p.Value)
+		_, _ = h.WriteString(";")
+	}
+}
+
+func (q *timeseriesQuerier) Query(ctx context.Context, start, end time.Time, matcherSets [][]*labels.Matcher) (_ map[[16]byte]labels.Labels, rerr error) {
+	ctx, span := q.tracer.Start(ctx, "chstorage.metrics.timeseries.Query")
+	defer func() {
+		xspan.End(span, rerr)
+	}()
+
+	var (
+		parentSpan   = span
+		parentLink   = trace.LinkFromContext(ctx)
+		matchersHash = q.hashMatchers(start, end, matcherSets)
+	)
+	resultCh := q.hashSg.DoChan(matchersHash, func() (metricsTimeseries, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		return q.queryTimeseries(ctx, parentSpan, parentLink, start, end, matcherSets)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case r := <-resultCh:
+		result, shared, err := r.Val, r.Shared, r.Err
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			// Query did not complete, probably stuck.
+			span.AddEvent("retry_query")
+			// Try again without singleflight.
+			result, err = q.queryTimeseries(ctx, trace.Span(nil), trace.Link{}, start, end, matcherSets)
+			shared = false
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		span.AddEvent("timeseries_fetched", trace.WithAttributes(
+			attribute.Int("chstorage.total_series", len(r.Val)),
+			attribute.Bool("chstorage.shared_result", shared),
+		))
+		return result, nil
+	}
+}
+
+func (q *timeseriesQuerier) queryTimeseries(ctx context.Context, parentSpan trace.Span, parentLink trace.Link, start, end time.Time, matcherSets [][]*labels.Matcher) (_ map[[16]byte]labels.Labels, rerr error) {
+	table := q.tables.Timeseries
+
+	ctx, span := q.tracer.Start(ctx, "chstorage.metrics.timeseries.queryTimeseries",
+		trace.WithAttributes(
+			attribute.String("chstorage.table", table),
+		),
+		trace.WithLinks(parentLink),
+	)
+	defer func() {
+		xspan.End(span, rerr)
+	}()
+	if parentSpan != nil {
+		parentSpan.AddLink(trace.LinkFromContext(ctx))
+	}
+
+	var (
+		c           = newTimeseriesColumns()
+		selectExprs = MergeColumns(
+			Columns{
+				{Name: "name", Data: c.name},
+			},
+			c.attributes.Columns(),
+			c.scope.Columns(),
+			c.resource.Columns(),
+		).ChsqlResult()
+	)
+	selectExprs = append(selectExprs, chsql.ResultColumn{
+		Name: "hash",
+		Expr: chsql.Function("any", chsql.Ident("hash")),
+		Data: c.hash,
+	})
+
+	var (
+		query = chsql.Select(table, selectExprs...)
+		sets  = make([]chsql.Expr, 0, len(matcherSets))
+	)
+	for _, set := range matcherSets {
+		matchers := make([]chsql.Expr, 0, len(set))
+		for _, m := range set {
+			selector := chsql.Ident("name")
+			if name := m.Name; name != metricstorage.MetricName {
+				selector = firstAttrSelector(name)
+			}
+			expr, err := promQLLabelMatcher([]chsql.Expr{selector}, m.Type, m.Value)
+			if err != nil {
+				return nil, err
+			}
+			matchers = append(matchers, expr)
+		}
+		sets = append(sets, chsql.JoinAnd(matchers...))
+	}
+	query.Where(chsql.JoinOr(sets...))
+	query.GroupBy(
+		chsql.Ident("name"),
+		chsql.Ident("attribute"),
+		chsql.Ident("scope"),
+		chsql.Ident("resource"),
+	)
+	timeseriesInRange(query, start, end, c.timestampPrecision())
+
+	var (
+		set = map[[16]byte]labels.Labels{}
+		lb  labels.ScratchBuilder
+	)
+	if err := q.do(ctx, selectQuery{
+		Query: query,
+		OnResult: func(ctx context.Context, block proto.Block) error {
+			for i := 0; i < c.name.Rows(); i++ {
+				var (
+					name       = c.name.Row(i)
+					hash       = c.hash.Row(i)
+					attributes = c.attributes.Row(i)
+					scope      = c.scope.Row(i)
+					resource   = c.resource.Row(i)
+				)
+
+				_, ok := set[hash]
+				if !ok {
+					lb.Reset()
+					for k, v := range attributes.AsMap().All() {
+						lb.Add(k, v.AsString())
+					}
+					for k, v := range scope.AsMap().All() {
+						lb.Add(k, v.AsString())
+					}
+					for k, v := range resource.AsMap().All() {
+						lb.Add(k, v.AsString())
+					}
+					lb.Add("__name__", name)
+					lb.Sort()
+					set[hash] = lb.Labels()
+				}
+			}
+			return nil
+		},
+
+		Type:   "QueryTimeseries",
+		Signal: "metrics",
+		Table:  table,
+	}); err != nil {
+		return nil, err
+	}
+	span.AddEvent("timeseries_fetched", trace.WithAttributes(
+		attribute.Int("chstorage.total_series", len(set)),
+	))
+
+	return set, nil
+}
+
+func (q *timeseriesQuerier) hashMetadataOptions(opts metricstorage.MetadataParams) xxh3.Uint128 {
+	h := xxh3.New()
+	_, _ = h.WriteString(opts.MetricName)
+	_, _ = h.WriteString(";")
+	buf := make([]byte, 0, 32)
+	buf = strconv.AppendInt(buf[:0], int64(opts.Limit), 10)
+	_, _ = h.Write(buf)
+	return h.Sum128()
+}
+
+func (q *timeseriesQuerier) QueryMetadata(ctx context.Context, params metricstorage.MetadataParams) (_ metricstorage.Metadata, rerr error) {
+	ctx, span := q.tracer.Start(ctx, "chstorage.metrics.timeseries.QueryMetadata",
+		trace.WithAttributes(
+			attribute.String("chstorage.metric_name", params.MetricName),
+			attribute.Int("chstorage.limit", params.Limit),
+		),
+	)
+	defer func() {
+		xspan.End(span, rerr)
+	}()
+
+	var (
+		parentSpan = span
+		parentLink = trace.LinkFromContext(ctx)
+		hash       = q.hashMetadataOptions(params)
+	)
+	resultCh := q.metadataSg.DoChan(hash, func() (metricstorage.Metadata, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		return q.queryMetadata(ctx, parentSpan, parentLink, params)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case r := <-resultCh:
+		result, shared, err := r.Val, r.Shared, r.Err
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			// Query did not complete, probably stuck.
+			span.AddEvent("retry_query")
+			// Try again without singleflight.
+			result, err = q.queryMetadata(ctx, trace.Span(nil), trace.Link{}, params)
+			shared = false
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		span.AddEvent("metadata_fetched", trace.WithAttributes(
+			attribute.Int("chstorage.total_metrics", len(r.Val)),
+			attribute.Bool("chstorage.shared_result", shared),
+		))
+		return result, nil
+	}
+}
+
+func (q *timeseriesQuerier) queryMetadata(
+	ctx context.Context,
+	parentSpan trace.Span, parentLink trace.Link,
+	params metricstorage.MetadataParams,
+) (_ metricstorage.Metadata, rerr error) {
+	table := q.tables.Timeseries
+
+	ctx, span := q.tracer.Start(ctx, "chstorage.metrics.timeseries.queryMetadata",
+		trace.WithAttributes(
+			attribute.String("chstorage.metric_name", params.MetricName),
+			attribute.Int("chstorage.limit", params.Limit),
+			attribute.String("chstorage.table", table),
+		),
+		trace.WithLinks(parentLink),
+	)
+	defer func() {
+		xspan.End(span, rerr)
+	}()
+	if parentSpan != nil {
+		parentSpan.AddLink(trace.LinkFromContext(ctx))
+	}
+
+	var (
+		c           = newTimeseriesColumns()
+		selectExprs = []chsql.ResultColumn{
+			{Name: "name", Data: c.name, Expr: chsql.Ident("name")},
+			{Name: "unit", Data: c.unit.Data, Expr: chsql.ToLowCardinality(chsql.Function("any", chsql.Ident("unit")))},
+			{Name: "description", Data: c.description, Expr: chsql.Function("any", chsql.Ident("description"))},
+		}
+	)
+	query := chsql.Select(table, selectExprs...)
+	if name := params.MetricName; name != "" {
+		query.Where(chsql.Eq(
+			chsql.Ident("name"),
+			chsql.String(name),
+		))
+	}
+	query.GroupBy(chsql.Ident("name"))
+	query.Order(chsql.Ident("name"), chsql.Asc)
+	if limit := params.Limit; limit > 0 {
+		query.Limit(limit)
+	}
+
+	set := metricstorage.Metadata{}
+	if err := q.do(ctx, selectQuery{
+		Query: query,
+		OnResult: func(ctx context.Context, block proto.Block) error {
+			for i := 0; i < c.name.Rows(); i++ {
+				var (
+					name        = c.name.Row(i)
+					unit        = c.unit.Row(i)
+					description = c.description.Row(i)
+				)
+				set[name] = metricstorage.MetricMetadata{
+					// TODO(tdakkota): save and return metric type
+					Type: promapi.MetricMetadataTypeCounter,
+					Unit: unit,
+					Help: description,
+				}
+			}
+			return nil
+		},
+
+		Type:   "QueryMetadata",
+		Signal: "metrics",
+		Table:  table,
+	}); err != nil {
+		return nil, err
+	}
+	span.AddEvent("metadata_fetched", trace.WithAttributes(
+		attribute.Int("chstorage.total_metrics", len(set)),
+	))
+
+	return set, nil
+}

@@ -10,7 +10,7 @@ import (
 	"github.com/go-faster/sdk/zctx"
 	"go.uber.org/zap"
 
-	"github.com/go-faster/oteldb/internal/autozpages"
+	"github.com/oteldb/oteldb/internal/autozpages"
 )
 
 func main() {
@@ -25,6 +25,7 @@ func main() {
 		}()
 		set := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 		cfgPath := set.String("config", "", "Path to config (defaults to oteldb.yml)")
+		embedded := set.Bool("embedded", false, "Serve every signal from the embedded storage engine (no external ClickHouse required)")
 		if err := set.Parse(os.Args[1:]); err != nil {
 			return err
 		}
@@ -33,11 +34,17 @@ func main() {
 		if err != nil {
 			return errors.Wrap(err, "load config")
 		}
+		if *embedded {
+			cfg.useEmbeddedStorage()
+		}
 
 		root, err := newApp(ctx, cfg, m)
 		if err != nil {
 			return errors.Wrap(err, "setup")
 		}
+
+		lg.Info("Starting oteldb")
+
 		return root.Run(m.ShutdownContext())
 	},
 		app.WithServiceName("oteldb"),

@@ -17,8 +17,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
-	"github.com/go-faster/oteldb/integration"
-	"github.com/go-faster/oteldb/internal/chtrace"
+	"github.com/oteldb/oteldb/integration"
+	"github.com/oteldb/oteldb/internal/chtrace"
 )
 
 func discardResult() proto.Result {
@@ -32,8 +32,11 @@ func ConnectOpt(t *testing.T, connOpt ch.Options) *ch.Client {
 
 	req := testcontainers.ContainerRequest{
 		Name:         "oteldb-chotel-clickhouse",
-		Image:        "clickhouse/clickhouse-server:23.12",
+		Image:        "clickhouse/clickhouse-server:25.9",
 		ExposedPorts: []string{"8123/tcp", "9000/tcp"},
+		Env: map[string]string{
+			"CLICKHOUSE_PASSWORD": "default",
+		},
 	}
 	chContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
@@ -71,6 +74,8 @@ func TestIntegrationTrace(t *testing.T) {
 		Logger:                       zap.NewNop(),
 		OpenTelemetryInstrumentation: true,
 		TracerProvider:               provider,
+		User:                         "default",
+		Password:                     "default",
 		Settings: []ch.Setting{
 			{
 				Key:       "send_logs_level",
@@ -85,10 +90,12 @@ func TestIntegrationTrace(t *testing.T) {
 	require.NoError(t, conn.Do(ctx, ch.Query{
 		Body:   "SELECT 1",
 		Result: discardResult(),
-		OnLog: func(ctx context.Context, l ch.Log) error {
+		OnLogs: func(ctx context.Context, logs []ch.Log) error {
 			sc := trace.SpanContextFromContext(ctx)
 			traceID = sc.TraceID()
-			t.Logf("[%s-%s]: %s", sc.TraceID(), sc.SpanID(), l.Text)
+			for _, l := range logs {
+				t.Logf("[%s-%s]: %s", sc.TraceID(), sc.SpanID(), l.Text)
+			}
 			return nil
 		},
 	}))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,8 +41,51 @@ func (opts *DialOptions) setDefaults() {
 	}
 }
 
-// Dial creates new [ClickhouseClient] using given DSN.
-func Dial(ctx context.Context, dsn string, opts DialOptions) (ClickhouseClient, error) {
+func parseCompressionType(opts *ch.Options, q url.Values, lg *zap.Logger) {
+	v := q.Get("compression")
+	if v == "" {
+		return
+	}
+
+	compression, err := ch.CompressionString(strings.ToLower(v))
+	if err != nil {
+		lg.Warn("Invalid compression value, using default", zap.String("compression", v))
+		return
+	}
+
+	lg.Debug("Using compression", zap.Stringer("compression", compression))
+	opts.Compression = compression
+}
+
+func parseCompressionLevel(opts *ch.Options, q url.Values, lg *zap.Logger) {
+	v := q.Get("compression_level")
+	if v == "" {
+		return
+	}
+
+	compressionLevel, err := strconv.ParseUint(v, 10, 32)
+	if err != nil {
+		lg.Warn("Invalid compression level value", zap.String("compression_level", v), zap.Error(err))
+		return
+	}
+
+	if opts.Compression != ch.CompressionLZ4HC {
+		lg.Warn("Compression level is only applicable for LZ4HC compression method, ignoring")
+		return
+	}
+
+	lg.Debug("Using compression level", zap.Uint64("compression_level", compressionLevel))
+	opts.CompressionLevel = ch.CompressionLevel(compressionLevel)
+}
+
+// parseCompressionParams parses compression parameters from URL query and applies them to ClickHouse options.
+func parseCompressionParams(opts *ch.Options, q url.Values, lg *zap.Logger) {
+	parseCompressionType(opts, q, lg)
+	parseCompressionLevel(opts, q, lg)
+}
+
+// Dial creates new [ClickHouseClient] using given DSN.
+func Dial(ctx context.Context, dsn string, opts DialOptions) (ClickHouseClient, error) {
 	opts.setDefaults()
 	lg := opts.Logger
 
@@ -76,12 +120,14 @@ func Dial(ctx context.Context, dsn string, opts DialOptions) (ClickhouseClient, 
 		// Capture query body and other parameters.
 		OpenTelemetryInstrumentation: true,
 	}
+	q := u.Query()
+	parseCompressionParams(&chOpts, q, chLogger)
 
 	connectBackoff := backoff.NewExponentialBackOff()
 	connectBackoff.InitialInterval = 2 * time.Second
 	connectBackoff.MaxElapsedTime = time.Minute
 	return backoff.RetryNotifyWithData(
-		func() (ClickhouseClient, error) {
+		func() (ClickHouseClient, error) {
 			client, err := chpool.Dial(ctx, chpool.Options{
 				ClientOptions:     chOpts,
 				HealthCheckPeriod: time.Second,
@@ -94,6 +140,10 @@ func Dial(ctx context.Context, dsn string, opts DialOptions) (ClickhouseClient, 
 			if err := client.Ping(ctx); err != nil {
 				return nil, errors.Wrap(err, "ping")
 			}
+			meter := opts.MeterProvider.Meter("chstorage.pool")
+			if err := poolMetrics(meter, client); err != nil {
+				return nil, errors.Wrap(err, "setup pool metrics")
+			}
 			return client, nil
 		},
 		backoff.WithContext(connectBackoff, ctx),
@@ -104,4 +154,118 @@ func Dial(ctx context.Context, dsn string, opts DialOptions) (ClickhouseClient, 
 			)
 		},
 	)
+}
+
+func poolMetrics(meter metric.Meter, pool *chpool.Pool) error {
+	totalResources, err := meter.Int64ObservableGauge("chpool.total_resources",
+		metric.WithDescription("Total number of resources currently in the ClickHouse pool"),
+		metric.WithUnit("{resources}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	constructingResources, err := meter.Int64ObservableGauge("chpool.constructing_resources",
+		metric.WithDescription("Number of resources being constructed in the ClickHouse pool"),
+		metric.WithUnit("{resources}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	acquiredResources, err := meter.Int64ObservableGauge("chpool.acquired_resources",
+		metric.WithDescription("Number of currently acquired resources from the ClickHouse pool"),
+		metric.WithUnit("{resources}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	idleResources, err := meter.Int64ObservableGauge("chpool.idle_resources",
+		metric.WithDescription("Number of currently idle resources in the ClickHouse pool"),
+		metric.WithUnit("{resources}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	maxResources, err := meter.Int64ObservableGauge("chpool.max_resources",
+		metric.WithDescription("Maximum configured size of the ClickHouse pool"),
+		metric.WithUnit("{resources}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	acquireCount, err := meter.Int64ObservableGauge("chpool.acquire_count",
+		metric.WithDescription("Cumulative count of successful acquires from the ClickHouse pool"),
+		metric.WithUnit("{acquires}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	acquireDuration, err := meter.Int64ObservableGauge("chpool.acquire_duration_ns",
+		metric.WithDescription("Total duration of successful acquires from the ClickHouse pool in nanoseconds"),
+		metric.WithUnit("ns"),
+	)
+	if err != nil {
+		return err
+	}
+
+	emptyAcquireCount, err := meter.Int64ObservableGauge("chpool.empty_acquire_count",
+		metric.WithDescription("Cumulative count of acquires that waited because the pool was empty"),
+		metric.WithUnit("{acquires}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	emptyAcquireWaitTime, err := meter.Int64ObservableGauge("chpool.empty_acquire_wait_time_ns",
+		metric.WithDescription("Cumulative time waited for acquires that waited because the pool was empty, in nanoseconds"),
+		metric.WithUnit("ns"),
+	)
+	if err != nil {
+		return err
+	}
+
+	canceledAcquireCount, err := meter.Int64ObservableGauge("chpool.canceled_acquire_count",
+		metric.WithDescription("Cumulative count of acquires canceled by context"),
+		metric.WithUnit("{acquires}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		stat := pool.Stat()
+
+		o.ObserveInt64(totalResources, int64(stat.TotalResources()))
+		o.ObserveInt64(constructingResources, int64(stat.ConstructingResources()))
+		o.ObserveInt64(acquiredResources, int64(stat.AcquiredResources()))
+		o.ObserveInt64(idleResources, int64(stat.IdleResources()))
+		o.ObserveInt64(maxResources, int64(stat.MaxResources()))
+
+		o.ObserveInt64(acquireCount, stat.AcquireCount())
+		o.ObserveInt64(acquireDuration, stat.AcquireDuration().Nanoseconds())
+
+		o.ObserveInt64(emptyAcquireCount, stat.EmptyAcquireCount())
+		o.ObserveInt64(emptyAcquireWaitTime, stat.EmptyAcquireWaitTime().Nanoseconds())
+		o.ObserveInt64(canceledAcquireCount, stat.CanceledAcquireCount())
+
+		return nil
+	},
+		totalResources,
+		constructingResources,
+		acquiredResources,
+		idleResources,
+		maxResources,
+		acquireCount,
+		acquireDuration,
+		emptyAcquireCount,
+		emptyAcquireWaitTime,
+		canceledAcquireCount,
+	)
+
+	return err
 }

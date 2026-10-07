@@ -8,11 +8,11 @@ import (
 	"go.opentelemetry.io/collector/pdata/plog"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 
-	"github.com/go-faster/oteldb/internal/chstorage/chsql"
-	"github.com/go-faster/oteldb/internal/ddl"
-	"github.com/go-faster/oteldb/internal/logstorage"
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/xsync"
+	"github.com/oteldb/oteldb/internal/chstorage/chsql"
+	"github.com/oteldb/oteldb/internal/ddl"
+	"github.com/oteldb/oteldb/internal/logstorage"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/xsync"
 )
 
 var (
@@ -97,7 +97,7 @@ func newLogColumns() *logColumns {
 // DDL of the log table.
 func (c *logColumns) DDL() ddl.Table {
 	table := ddl.Table{
-		Engine:      "MergeTree",
+		Engine:      ddl.Engine{Type: "MergeTree"},
 		PartitionBy: "toYYYYMMDD(timestamp)",
 		PrimaryKey:  []string{"severity_number", "service_namespace", "service_name", "resource"},
 		OrderBy:     []string{"severity_number", "service_namespace", "service_name", "resource", "timestamp"},
@@ -122,12 +122,6 @@ func (c *logColumns) DDL() ddl.Table {
 				Target:      "timestamp",
 				Type:        "minmax",
 				Granularity: 8192,
-			},
-			{
-				Name:   "attribute_keys",
-				Target: "arrayConcat(JSONExtractKeys(attribute), JSONExtractKeys(scope), JSONExtractKeys(resource))",
-				Type:   "set",
-				Params: []string{"100"},
 			},
 		},
 		Columns: []ddl.Column{
@@ -208,12 +202,18 @@ func (c *logColumns) StaticColumns() []string {
 }
 
 func setStrOrEmpty(col proto.ColumnOf[string], m pcommon.Map, k string) {
-	v, ok := m.Get(k)
-	if !ok {
-		col.Append("")
-		return
+	setStrOr(col, m, k, "")
+}
+
+// setStrOr appends m[k] to col, or def when the key is absent or empty.
+func setStrOr(col proto.ColumnOf[string], m pcommon.Map, k, def string) {
+	if v, ok := m.Get(k); ok {
+		if s := v.AsString(); s != "" {
+			col.Append(s)
+			return
+		}
 	}
-	col.Append(v.AsString())
+	col.Append(def)
 }
 
 func (c *logColumns) ForEach(f func(r logstorage.Record) error) error {
@@ -265,7 +265,10 @@ func (c *logColumns) AddRow(r logstorage.Record) {
 	{
 		m := r.ResourceAttrs.AsMap()
 		setStrOrEmpty(c.serviceInstanceID, m, string(semconv.ServiceInstanceIDKey))
-		setStrOrEmpty(c.serviceName, m, string(semconv.ServiceNameKey))
+		// Default service_name to "unknown_service" when service.name is absent, so
+		// {service_name="unknown_service"} selects these streams — matching Loki and
+		// the embedded engine (see logstorage.DefaultServiceName).
+		setStrOr(c.serviceName, m, string(semconv.ServiceNameKey), logstorage.DefaultServiceName)
 		setStrOrEmpty(c.serviceNamespace, m, string(semconv.ServiceNamespaceKey))
 	}
 	// NOTE(tdakkota): otelcol filelog receiver sends entries
@@ -350,7 +353,7 @@ func (c *logAttrMapColumns) AddRow(name []byte, key string) {
 func (c *logAttrMapColumns) DDL() ddl.Table {
 	return ddl.Table{
 		OrderBy: []string{"name"},
-		Engine:  "ReplacingMergeTree",
+		Engine:  ddl.Engine{Type: "ReplacingMergeTree"},
 		Columns: []ddl.Column{
 			{
 				Name:    "name",

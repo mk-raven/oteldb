@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/otelstorage"
 )
 
 func Test_jsonLowCardinalityAttrCol(t *testing.T) {
@@ -32,7 +32,7 @@ func Test_jsonLowCardinalityAttrCol(t *testing.T) {
 		col.Append(v)
 		hashes = append(hashes, v.Hash())
 	}
-	for j := 0; j < 3; j++ {
+	for range 3 {
 		m := pcommon.NewMap()
 		v := otelstorage.Attrs(m)
 		col.Append(v)
@@ -81,7 +81,7 @@ func Test_jsonAttrCol(t *testing.T) {
 		col.Append(v)
 		hashes = append(hashes, v.Hash())
 	}
-	for j := 0; j < 3; j++ {
+	for range 3 {
 		m := pcommon.NewMap()
 		v := otelstorage.Attrs(m)
 		col.Append(v)
@@ -188,4 +188,24 @@ func BenchmarkEncodeAttributes(b *testing.B) {
 	if len(e.Bytes()) == 0 {
 		b.Fatal("unexpected result")
 	}
+}
+
+func TestDecodeAttributesBigInt(t *testing.T) {
+	// A uint64 attribute value beyond the int64 range must decode without error, preserved as a
+	// string (pcommon's int value is int64-only). Regression: a full-table scan previously crashed
+	// the whole block decode here with "value out of range".
+	attrs, err := decodeAttributes([]byte(`{"id":18446744073709551615}`))
+	require.NoError(t, err)
+	v, ok := attrs.AsMap().Get("id")
+	require.True(t, ok)
+	require.Equal(t, pcommon.ValueTypeStr, v.Type())
+	require.Equal(t, "18446744073709551615", v.Str())
+
+	// An in-range integer still decodes as an int.
+	attrs, err = decodeAttributes([]byte(`{"n":42}`))
+	require.NoError(t, err)
+	v, ok = attrs.AsMap().Get("n")
+	require.True(t, ok)
+	require.Equal(t, pcommon.ValueTypeInt, v.Type())
+	require.Equal(t, int64(42), v.Int())
 }

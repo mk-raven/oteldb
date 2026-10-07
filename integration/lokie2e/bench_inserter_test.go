@@ -10,13 +10,13 @@ import (
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/go-faster/oteldb/internal/chstorage"
-	"github.com/go-faster/oteldb/internal/logstorage"
+	"github.com/oteldb/oteldb/internal/chstorage"
+	"github.com/oteldb/oteldb/internal/logstorage"
 )
 
 type noopClickhouse struct{}
 
-var _ chstorage.ClickhouseClient = (*noopClickhouse)(nil)
+var _ chstorage.ClickHouseClient = (*noopClickhouse)(nil)
 
 func (*noopClickhouse) Do(context.Context, ch.Query) error { return nil }
 func (*noopClickhouse) Ping(context.Context) error         { return nil }
@@ -34,7 +34,8 @@ func BenchmarkInserterLogs(b *testing.B) {
 		TracerProvider: tracenoop.NewTracerProvider(),
 	})
 	require.NoError(b, err)
-	c := logstorage.NewConsumer(i)
+	c, err := logstorage.NewConsumer(i, logstorage.ConsumerOptions{})
+	require.NoError(b, err)
 
 	b.ReportAllocs()
 	b.ResetTimer()

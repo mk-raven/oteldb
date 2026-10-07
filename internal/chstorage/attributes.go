@@ -4,12 +4,10 @@ import (
 	"github.com/ClickHouse/ch-go/proto"
 	"github.com/go-faster/errors"
 	"github.com/go-faster/jx"
-	"go.opentelemetry.io/collector/pdata/pcommon"
-	"golang.org/x/exp/maps"
 
-	"github.com/go-faster/oteldb/internal/chstorage/chsql"
-	"github.com/go-faster/oteldb/internal/ddl"
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/chstorage/chsql"
+	"github.com/oteldb/oteldb/internal/ddl"
+	"github.com/oteldb/oteldb/internal/otelstorage"
 )
 
 type Attributes struct {
@@ -116,7 +114,7 @@ func (a *jsonLowCardinalityAttrCol) Reset() {
 	a.col.Reset()
 	a.index.Reset()
 	a.values = a.values[:0]
-	maps.Clear(a.hashes)
+	clear(a.hashes)
 	a.col.Key = proto.KeyUInt64
 }
 
@@ -285,11 +283,4 @@ func (a *Attributes) DDL(table *ddl.Table) {
 			Type: a.Value.Type(),
 		},
 	)
-}
-
-func attrsToLabels(m otelstorage.Attrs, to map[string]string) {
-	m.AsMap().Range(func(k string, v pcommon.Value) bool {
-		to[k] = v.Str()
-		return true
-	})
 }

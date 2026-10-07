@@ -1,0 +1,27 @@
+{
+  "severity": {
+    "str": "Info",
+    "number": 9,
+    "text": "info"
+  },
+  "body": "Events",
+  "timestamp": "2023-12-04T09:11:59.161318302Z",
+  "observed_timestamp": "2026-01-20T01:02:03.000000004Z",
+  "attrs": {
+    "logger": "poll",
+    "caller": "gh-archived/main.go:197",
+    "duration": 0.437301455,
+    "integers": [
+      1,
+      2,
+      3
+    ],
+    "new_count": 100,
+    "remaining": 1040,
+    "used": 3960,
+    "reset": 660.838704106,
+    "reset_human": "in 12 minutes",
+    "sleep": 0.198120375,
+    "target_rate": 0.63542183
+  }
+}

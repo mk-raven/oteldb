@@ -15,7 +15,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
-	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -29,10 +29,13 @@ func (c *codeRecorder) WriteHeader(status int) {
 	c.ResponseWriter.WriteHeader(status)
 }
 
+func (c *codeRecorder) Unwrap() http.ResponseWriter {
+	return c.ResponseWriter
+}
+
 // handleGetAppsRequest handles getApps operation.
 //
-// Returns list of application metadata.
-// Used by Grafana to test connection to Pyroscope.
+// Returns list of application metadata. Used by Grafana to test connection to Pyroscope.
 //
 // GET /api/apps
 func (s *Server) handleGetAppsRequest(args [0]string, argsEscaped bool, w http.ResponseWriter, r *http.Request) {
@@ -43,6 +46,8 @@ func (s *Server) handleGetAppsRequest(args [0]string, argsEscaped bool, w http.R
 		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/api/apps"),
 	}
+	// Add attributes from config.
+	otelAttrs = append(otelAttrs, s.cfg.Attributes...)
 
 	// Start a span for this request.
 	ctx, span := s.cfg.Tracer.Start(r.Context(), GetAppsOperation,
@@ -66,7 +71,7 @@ func (s *Server) handleGetAppsRequest(args [0]string, argsEscaped bool, w http.R
 		if code != 0 {
 			codeAttr := semconv.HTTPResponseStatusCode(code)
 			attrs = append(attrs, codeAttr)
-			span.SetAttributes(codeAttr)
+			span.SetAttributes(attrs...)
 		}
 		attrOpt := metric.WithAttributes(attrs...)
 
@@ -176,6 +181,8 @@ func (s *Server) handleIngestRequest(args [0]string, argsEscaped bool, w http.Re
 		semconv.HTTPRequestMethodKey.String("POST"),
 		semconv.HTTPRouteKey.String("/ingest"),
 	}
+	// Add attributes from config.
+	otelAttrs = append(otelAttrs, s.cfg.Attributes...)
 
 	// Start a span for this request.
 	ctx, span := s.cfg.Tracer.Start(r.Context(), IngestOperation,
@@ -199,7 +206,7 @@ func (s *Server) handleIngestRequest(args [0]string, argsEscaped bool, w http.Re
 		if code != 0 {
 			codeAttr := semconv.HTTPResponseStatusCode(code)
 			attrs = append(attrs, codeAttr)
-			span.SetAttributes(codeAttr)
+			span.SetAttributes(attrs...)
 		}
 		attrOpt := metric.WithAttributes(attrs...)
 
@@ -371,6 +378,8 @@ func (s *Server) handleLabelValuesRequest(args [0]string, argsEscaped bool, w ht
 		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/label-values"),
 	}
+	// Add attributes from config.
+	otelAttrs = append(otelAttrs, s.cfg.Attributes...)
 
 	// Start a span for this request.
 	ctx, span := s.cfg.Tracer.Start(r.Context(), LabelValuesOperation,
@@ -394,7 +403,7 @@ func (s *Server) handleLabelValuesRequest(args [0]string, argsEscaped bool, w ht
 		if code != 0 {
 			codeAttr := semconv.HTTPResponseStatusCode(code)
 			attrs = append(attrs, codeAttr)
-			span.SetAttributes(codeAttr)
+			span.SetAttributes(attrs...)
 		}
 		attrOpt := metric.WithAttributes(attrs...)
 
@@ -535,6 +544,8 @@ func (s *Server) handleLabelsRequest(args [0]string, argsEscaped bool, w http.Re
 		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/labels"),
 	}
+	// Add attributes from config.
+	otelAttrs = append(otelAttrs, s.cfg.Attributes...)
 
 	// Start a span for this request.
 	ctx, span := s.cfg.Tracer.Start(r.Context(), LabelsOperation,
@@ -558,7 +569,7 @@ func (s *Server) handleLabelsRequest(args [0]string, argsEscaped bool, w http.Re
 		if code != 0 {
 			codeAttr := semconv.HTTPResponseStatusCode(code)
 			attrs = append(attrs, codeAttr)
-			span.SetAttributes(codeAttr)
+			span.SetAttributes(attrs...)
 		}
 		attrOpt := metric.WithAttributes(attrs...)
 
@@ -684,8 +695,7 @@ func (s *Server) handleLabelsRequest(args [0]string, argsEscaped bool, w http.Re
 
 // handleRenderRequest handles render operation.
 //
-// Renders given query.
-// One of `query` or `key` is required.
+// Renders given query. One of `query` or `key` is required.
 //
 // GET /render
 func (s *Server) handleRenderRequest(args [0]string, argsEscaped bool, w http.ResponseWriter, r *http.Request) {
@@ -696,6 +706,8 @@ func (s *Server) handleRenderRequest(args [0]string, argsEscaped bool, w http.Re
 		semconv.HTTPRequestMethodKey.String("GET"),
 		semconv.HTTPRouteKey.String("/render"),
 	}
+	// Add attributes from config.
+	otelAttrs = append(otelAttrs, s.cfg.Attributes...)
 
 	// Start a span for this request.
 	ctx, span := s.cfg.Tracer.Start(r.Context(), RenderOperation,
@@ -719,7 +731,7 @@ func (s *Server) handleRenderRequest(args [0]string, argsEscaped bool, w http.Re
 		if code != 0 {
 			codeAttr := semconv.HTTPResponseStatusCode(code)
 			attrs = append(attrs, codeAttr)
-			span.SetAttributes(codeAttr)
+			span.SetAttributes(attrs...)
 		}
 		attrOpt := metric.WithAttributes(attrs...)
 
@@ -770,7 +782,7 @@ func (s *Server) handleRenderRequest(args [0]string, argsEscaped bool, w http.Re
 
 	var rawBody []byte
 
-	var response *FlamebearerProfileV1
+	var response RenderRes
 	if m := s.cfg.Middleware; m != nil {
 		mreq := middleware.Request{
 			Context:          ctx,
@@ -815,7 +827,7 @@ func (s *Server) handleRenderRequest(args [0]string, argsEscaped bool, w http.Re
 		type (
 			Request  = struct{}
 			Params   = RenderParams
-			Response = *FlamebearerProfileV1
+			Response = RenderRes
 		)
 		response, err = middleware.HookMiddleware[
 			Request,

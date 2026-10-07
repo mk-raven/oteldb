@@ -1,10 +1,24 @@
 fail_on_severity: "low"
 allow_licenses:
   - "MIT"
+  - "MIT-0"
   - "ISC"
   - "MPL-2.0"
   - "BSD-2-Clause"
   - "BSD-3-Clause"
   - "Apache-2.0"
+  - "LicenseRef-scancode-google-patent-license-golang"
 allow-dependencies-licenses:
+  # Have a separate non-GPL license.
   - "pkg:golang/github.com/grafana/loki/pkg/push"
+  # The pyroscope/api module is Apache-2.0 (its own LICENSE file), though the parent
+  # pyroscope repo is AGPL; we use it for the Pyroscope connect QuerierService types.
+  - "pkg:golang/github.com/grafana/pyroscope/api"
+  # Simply wrong.
+  # See https://github.com/hashicorp/cronexpr/blob/master/LICENSE.
+  - "pkg:golang/github.com/hashicorp/cronexpr"
+  # Used in CI, is not directly linked or used by oteldb.
+  - "pkg:actions/go-task/setup-task"
+  # Simply wrong: the module's LICENSE file is MPL-2.0; no JSON-licensed
+  # files exist in the module. See https://github.com/hashicorp/consul/blob/main/api/LICENSE.
+  - "pkg:golang/github.com/hashicorp/consul/api"

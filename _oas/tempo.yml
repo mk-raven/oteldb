@@ -19,6 +19,7 @@ paths:
           $ref: "#/components/responses/BuildInfo"
         default:
           $ref: "#/components/responses/Error"
+
   /api/echo:
     get:
       operationId: echo
@@ -49,15 +50,13 @@ paths:
         - name: start
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: Along with `end` define a time range from which traces should be returned.
 
         - name: end
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `start` define a time range from which traces should be returned.
             Providing both `start` and `end` will include traces for the specified time range only.
@@ -65,9 +64,18 @@ paths:
             If the parameters are provided, it will only check in the blocks within the specified time range,
             this can result in trace not being found or partial results if it does not fall in the specified time range.
 
+        - name: since
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Can be used instead of `start` and `end` to define the time range in relative values.
+            For example, `since=15m` queries the last 15 minutes.
+
+            Default is the last 1 hour.
+
         - name: Accept
           in: header
-          required: true
           schema:
             type: string
       responses:
@@ -122,20 +130,28 @@ paths:
         - name: start
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: Along with `end` define a time range from which traces should be returned.
 
         - name: end
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `start`, define a time range from which traces should be returned.
             Providing both `start` and `end` will change the way that Tempo searches.
             If the parameters are not provided, then Tempo will search the recent trace data stored in the ingesters.
             If the parameters are provided, it will search the backend as well.
+
+        - name: since
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Can be used instead of `start` and `end` to define the time range in relative values.
+            For example, `since=15m` queries the last 15 minutes.
+
+            Default is the last 1 hour.
 
         - name: spss
           in: query
@@ -143,6 +159,7 @@ paths:
             type: integer
           description: |
             Limit the number of spans per span-set. Default value is 3.
+
       responses:
         200:
           $ref: "#/components/responses/Search"
@@ -164,19 +181,28 @@ paths:
         - name: start
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `end` define a time range from which tags should be returned.
 
         - name: end
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `start` define a time range from which tags should be returned.
             Providing both `start` and `end` includes blocks for the specified time range only.
+
+        - name: since
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Can be used instead of `start` and `end` to define the time range in relative values.
+            For example, `since=15m` queries the last 15 minutes.
+
+            Default is the last 1 hour.
+
       responses:
         200:
           $ref: "#/components/responses/SearchTags"
@@ -211,22 +237,82 @@ paths:
         - name: start
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `end` define a time range from which tags should be returned.
 
         - name: end
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `start` define a time range from which tags should be returned.
             Providing both `start` and `end` includes blocks for the specified time range only.
+
+        - name: since
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Can be used instead of `start` and `end` to define the time range in relative values.
+            For example, `since=15m` queries the last 15 minutes.
+
+            Default is the last 1 hour.
+
       responses:
         200:
           $ref: "#/components/responses/SearchTagValues"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/v2/traces/{traceID}:
+    get:
+      operationId: traceByIDv2
+      description: Querying traces by id.
+      parameters:
+        - name: traceID
+          in: path
+          required: true
+          schema:
+            type: string
+          description: TraceID to query.
+
+        - name: start
+          in: query
+          schema:
+            $ref: "#/components/schemas/TempoTime"
+          description: Along with `end` define a time range from which traces should be returned.
+
+        - name: end
+          in: query
+          schema:
+            $ref: "#/components/schemas/TempoTime"
+          description: |
+            Along with `start` define a time range from which traces should be returned.
+            Providing both `start` and `end` will include traces for the specified time range only.
+            If the parameters are not provided then Tempo will check for the trace across all blocks in backend.
+            If the parameters are provided, it will only check in the blocks within the specified time range,
+            this can result in trace not being found or partial results if it does not fall in the specified time range.
+
+        - name: since
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Can be used instead of `start` and `end` to define the time range in relative values.
+            For example, `since=15m` queries the last 15 minutes.
+
+            Default is the last 1 hour.
+
+        - name: Accept
+          in: header
+          schema:
+            type: string
+      responses:
+        200:
+          $ref: "#/components/responses/TraceByIDV2"
+        404:
+          $ref: "#/components/responses/TraceByIDV2NotFound"
         default:
           $ref: "#/components/responses/Error"
 
@@ -258,19 +344,28 @@ paths:
         - name: start
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `end` define a time range from which tags should be returned.
 
         - name: end
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `start` define a time range from which tags should be returned.
             Providing both `start` and `end` includes blocks for the specified time range only.
+
+        - name: since
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Can be used instead of `start` and `end` to define the time range in relative values.
+            For example, `since=15m` queries the last 15 minutes.
+
+            Default is the last 1 hour.
+
       responses:
         200:
           $ref: "#/components/responses/SearchTagValuesV2"
@@ -282,6 +377,12 @@ paths:
       operationId: searchTagsV2
       description: This endpoint retrieves all discovered tag names that can be used in search.
       parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: |
+            A TraceQL query to filter tag names by.
         - name: scope
           in: query
           schema:
@@ -292,22 +393,145 @@ paths:
         - name: start
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `end` define a time range from which tags should be returned.
 
         - name: end
           in: query
           schema:
-            type: integer
-            format: unix-seconds
+            $ref: "#/components/schemas/TempoTime"
           description: |
             Along with `start` define a time range from which tags should be returned.
             Providing both `start` and `end` includes blocks for the specified time range only.
+
+        - name: since
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Can be used instead of `start` and `end` to define the time range in relative values.
+            For example, `since=15m` queries the last 15 minutes.
+
+            Default is the last 1 hour.
+
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          description: |
+            Sets the maximum number of tags names allowed per scope.
+            The query stops once this limit is reached for any scope.
       responses:
         200:
           $ref: "#/components/responses/SearchTagsV2"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/metrics/query_range:
+    get:
+      operationId: queryRange
+      description: This endpoint returns Prometheus-like time-series for a given metrics query.
+      parameters:
+        - name: q
+          required: true
+          in: query
+          schema:
+            type: string
+          description: |
+            The TraceQL metrics query to process.
+
+        - name: start
+          in: query
+          schema:
+            $ref: "#/components/schemas/TempoTime"
+          description: |
+            Along with `end` define a time range from which tags should be returned.
+
+        - name: end
+          in: query
+          schema:
+            $ref: "#/components/schemas/TempoTime"
+          description: |
+            Along with `start` define a time range from which tags should be returned.
+            Providing both `start` and `end` includes blocks for the specified time range only.
+
+        - name: since
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Can be used instead of `start` and `end` to define the time range in relative values.
+            For example, `since=15m` queries the last 15 minutes.
+
+            Default is the last 1 hour.
+
+        - name: step
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Defines the granularity of the returned time-series.
+            For example, `step=15s` returns a data point every 15s within the time range.
+
+            If not specified, then the default behavior chooses a dynamic step based on the time range.
+
+        - name: exemplars
+          in: query
+          schema:
+            type: integer
+          description: |
+            Defines the maximum number of exemplars for the query.
+
+            It's trimmed to `max_exemplars` if it exceeds it.
+
+      responses:
+        200:
+          $ref: "#/components/responses/RangeQueryResult"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/metrics/query:
+    get:
+      operationId: query
+      description: The instant version of the Metrics API is similar to the range version, but instead returns a single value for the query
+      parameters:
+        - name: q
+          required: true
+          in: query
+          schema:
+            type: string
+          description: |
+            The TraceQL metrics query to process.
+
+        - name: start
+          in: query
+          schema:
+            $ref: "#/components/schemas/TempoTime"
+          description: |
+            Along with `end` define a time range from which tags should be returned.
+
+        - name: end
+          in: query
+          schema:
+            $ref: "#/components/schemas/TempoTime"
+          description: |
+            Along with `start` define a time range from which tags should be returned.
+            Providing both `start` and `end` includes blocks for the specified time range only.
+
+        - name: since
+          in: query
+          schema:
+            $ref: "#/components/schemas/PrometheusDuration"
+          description: |
+            Can be used instead of `start` and `end` to define the time range in relative values.
+            For example, `since=15m` queries the last 15 minutes.
+
+            Default is the last 1 hour.
+
+      responses:
+        200:
+          $ref: "#/components/responses/InstantQueryResult"
         default:
           $ref: "#/components/responses/Error"
 
@@ -328,7 +552,7 @@ components:
     TraceByID:
       description: Query by trace ID result
       content:
-        "application/protobuf":
+        "*/*":
           schema:
             type: string
             format: binary
@@ -352,6 +576,15 @@ components:
         "application/json":
           schema:
             $ref: "#/components/schemas/TagValues"
+    TraceByIDV2:
+      description: Query by trace ID result
+      content:
+        "*/*":
+          schema:
+            type: string
+            format: binary
+    TraceByIDV2NotFound:
+      description: Trace not found
     SearchTagsV2:
       description: Search tags result
       content:
@@ -364,6 +597,18 @@ components:
         "application/json":
           schema:
             $ref: "#/components/schemas/TagValuesV2"
+    RangeQueryResult:
+      description: Metrics range query result
+      content:
+        "application/json":
+          schema:
+            $ref: "#/components/schemas/RangeMetrics"
+    InstantQueryResult:
+      description: Metrics instant query result
+      content:
+        "application/json":
+          schema:
+            $ref: "#/components/schemas/InstantMetrics"
 
   schemas:
     Traces:
@@ -373,6 +618,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TraceSearchMetadata"
+        metrics:
+          $ref: "#/components/schemas/SearchMetrics"
     TraceSearchMetadata:
       type: object
       required:
@@ -392,6 +639,14 @@ components:
           type: integer
         spanSet:
           $ref: "#/components/schemas/TempoSpanSet"
+        spanSets:
+          type: array
+          items:
+            $ref: "#/components/schemas/TempoSpanSet"
+        serviceStats:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ServiceStats"
     TempoSpanSet:
       type: object
       required:
@@ -424,6 +679,104 @@ components:
           format: int64
         attributes:
           $ref: "#/components/schemas/Attributes"
+
+    RangeMetrics:
+      type: object
+      required: [series]
+      properties:
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/TimeSeries"
+        metrics:
+          $ref: "#/components/schemas/SearchMetrics"
+        status:
+          $ref: "#/components/schemas/PartialStatus"
+        message:
+          type: string
+    InstantMetrics:
+      type: object
+      properties:
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/InstantSeries"
+        metrics:
+          $ref: "#/components/schemas/SearchMetrics"
+        status:
+          $ref: "#/components/schemas/PartialStatus"
+        message:
+          type: string
+    TimeSeries:
+      type: object
+      properties:
+        labels:
+          $ref: "#/components/schemas/Attributes"
+        samples:
+          type: array
+          items:
+            $ref: "#/components/schemas/Sample"
+        exemplars:
+          type: array
+          items:
+            $ref: "#/components/schemas/Exemplar"
+    InstantSeries:
+      type: object
+      properties:
+        labels:
+          $ref: "#/components/schemas/Attributes"
+        value:
+          type: number
+          format: float64
+    Sample:
+      type: object
+      properties:
+        timestamp_ms:
+          type: integer
+        value:
+          type: number
+          format: float64
+    Exemplar:
+      type: object
+      properties:
+        labels:
+          $ref: "#/components/schemas/Attributes"
+        timestamp_ms:
+          type: integer
+        value:
+          type: number
+          format: float64
+    SearchMetrics:
+      type: object
+      properties:
+        inspectedTraces:
+          type: integer
+        inspectedBytes:
+          type: integer
+          format: int64
+        totalBlocks:
+          type: integer
+        completedJobs:
+          type: integer
+        totalJobs:
+          type: integer
+        totalBlockBytes:
+          type: integer
+          format: int64
+        inspectedSpans:
+          type: integer
+          format: int64
+    ServiceStats:
+      type: object
+      properties:
+        spanCount:
+          type: integer
+        errorCount:
+          type: integer
+    QueryStats:
+      type: object
+    PartialStatus:
+      type: integer
 
     Attributes:
       type: array
@@ -471,11 +824,24 @@ components:
       properties:
         doubleValue:
           type: number
+    BytesValue:
+      type: object
+      required: [bytesValue]
+      properties:
+        bytesValue:
+          type: string
+          format: base64
     ArrayValue:
       type: object
       required: [arrayValue]
       properties:
         arrayValue:
+          $ref: "#/components/schemas/ArrayValueItems"
+    ArrayValueItems:
+      type: object
+      required: [values]
+      properties:
+        values:
           type: array
           items:
             $ref: "#/components/schemas/AnyValue"
@@ -484,16 +850,15 @@ components:
       required: [kvlistValue]
       properties:
         kvlistValue:
+          $ref: "#/components/schemas/KvlistValueItems"
+    KvlistValueItems:
+      type: object
+      required: [values]
+      properties:
+        values:
           type: array
           items:
             $ref: "#/components/schemas/KeyValue"
-    BytesValue:
-      type: object
-      required: [bytesValue]
-      properties:
-        bytesValue:
-          type: string
-          format: base64
 
     TagNames:
       type: object
@@ -502,6 +867,8 @@ components:
           type: array
           items:
             type: string
+        metrics:
+          $ref: "#/components/schemas/MetadataMetrics"
 
     TagValues:
       type: object
@@ -510,6 +877,8 @@ components:
           type: array
           items:
             type: string
+        metrics:
+          $ref: "#/components/schemas/MetadataMetrics"
 
     TagNamesV2:
       type: object
@@ -518,6 +887,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ScopeTags"
+        metrics:
+          $ref: "#/components/schemas/MetadataMetrics"
     ScopeTags:
       type: object
       required: [name]
@@ -536,10 +907,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TagValue"
+        metrics:
+          $ref: "#/components/schemas/MetadataMetrics"
 
     TagValue:
       type: object
-      required: [type, value]
+      required: [type]
       properties:
         type:
           # TODO(tdakkota): use enum?
@@ -550,10 +923,14 @@ components:
     TagScope:
       type: string
       enum:
-        - "span"
-        - "resource"
-        - "intrinsic"
-        - "none"
+        - none
+        - all
+        - instrumentation
+        - resource
+        - span
+        - intrinsic
+        - event
+        - link
 
     PrometheusVersion:
       type: object
@@ -578,5 +955,26 @@ components:
         goVersion:
           type: string
 
+    TempoTime:
+      type: string
+    PrometheusDuration:
+      type: string
+      pattern: "^[0-9smhdwy]+$"
+
     Error:
       type: string
+    MetadataMetrics:
+      type: object
+      properties:
+        inspectedBytes:
+          type: integer
+          format: int64
+        totalJobs:
+          type: integer
+        completedJobs:
+          type: integer
+        totalBlocks:
+          type: integer
+        totalBlockBytes:
+          type: integer
+          format: int64

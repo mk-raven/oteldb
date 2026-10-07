@@ -18,8 +18,8 @@ import (
 	testcontainerslog "github.com/testcontainers/testcontainers-go/log"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/go-faster/oteldb/integration"
-	"github.com/go-faster/oteldb/internal/promapi"
+	"github.com/oteldb/oteldb/integration"
+	"github.com/oteldb/oteldb/internal/promapi"
 )
 
 type jxEncode interface {
@@ -128,7 +128,7 @@ func TestPrometheusOAS(t *testing.T) {
 			Query: "go_info{}",
 			Start: start,
 			End:   end,
-			Step:  "15s",
+			Step:  promapi.NewOptString("15s"),
 		})
 		require.NoError(t, err)
 		m, ok := res.Data.GetMatrix()

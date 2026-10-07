@@ -3,6 +3,7 @@ package promhandler
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -20,8 +21,11 @@ import (
 	"golang.org/x/exp/maps"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/go-faster/oteldb/internal/metricstorage"
-	"github.com/go-faster/oteldb/internal/promapi"
+	"github.com/oteldb/oteldb/internal/chstorage"
+	"github.com/oteldb/oteldb/internal/metricstorage"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/promapi"
+	"github.com/oteldb/oteldb/internal/xattribute"
 )
 
 // Engine is a Prometheus engine interface.
@@ -35,8 +39,10 @@ type PromAPI struct {
 	eng       Engine
 	store     storage.Queryable
 	exemplars storage.ExemplarQueryable
+	metadata  metricstorage.MetadataQuerier
 
 	lookbackDelta time.Duration
+	defaultStep   time.Duration
 }
 
 var _ promapi.Handler = (*PromAPI)(nil)
@@ -46,6 +52,7 @@ func NewPromAPI(
 	eng Engine,
 	store storage.Queryable,
 	exemplars storage.ExemplarQueryable,
+	metadata metricstorage.MetadataQuerier,
 	opts PromAPIOptions,
 ) *PromAPI {
 	opts.setDefaults()
@@ -53,7 +60,9 @@ func NewPromAPI(
 		eng:           eng,
 		store:         store,
 		exemplars:     exemplars,
+		metadata:      metadata,
 		lookbackDelta: opts.LookbackDelta,
+		defaultStep:   opts.DefaultStep,
 	}
 }
 
@@ -62,11 +71,11 @@ var errResultTruncated = errors.New("results truncated due to limit")
 // GetLabelValues implements getLabelValues operation.
 // GET /api/v1/label/{label}/values
 func (h *PromAPI) GetLabelValues(ctx context.Context, params promapi.GetLabelValuesParams) (*promapi.LabelValuesResponse, error) {
-	mint, err := parseOptTimestamp(params.Start, promapi.MinTime)
+	mint, err := ParseOptTimestamp(params.Start, promapi.MinTime)
 	if err != nil {
 		return nil, validationErr("parse start", err)
 	}
-	maxt, err := parseOptTimestamp(params.End, promapi.MaxTime)
+	maxt, err := ParseOptTimestamp(params.End, promapi.MaxTime)
 	if err != nil {
 		return nil, validationErr("parse end", err)
 	}
@@ -74,6 +83,7 @@ func (h *PromAPI) GetLabelValues(ctx context.Context, params promapi.GetLabelVal
 	if err != nil {
 		return nil, validationErr("parse match", err)
 	}
+	label := otelstorage.UnescapeLabelName(params.Label)
 	hints := &storage.LabelHints{Limit: params.Limit.Or(0)}
 
 	q, err := h.querier(ctx, mint, maxt)
@@ -91,7 +101,7 @@ func (h *PromAPI) GetLabelValues(ctx context.Context, params promapi.GetLabelVal
 			matchers = sets[0]
 		}
 
-		values, annots, err := q.LabelValues(ctx, params.Label, hints, matchers...)
+		values, annots, err := q.LabelValues(ctx, label, hints, matchers...)
 		if err != nil {
 			return nil, executionErr("get label values", err)
 		}
@@ -116,12 +126,10 @@ func (h *PromAPI) GetLabelValues(ctx context.Context, params promapi.GetLabelVal
 	)
 	grp, grpCtx := errgroup.WithContext(ctx)
 	for _, set := range sets {
-		set := set
-
 		grp.Go(func() error {
 			ctx := grpCtx
 
-			vals, w, err := q.LabelValues(ctx, params.Label, hints, set...)
+			vals, w, err := q.LabelValues(ctx, label, hints, set...)
 			if err != nil {
 				return err
 			}
@@ -162,11 +170,11 @@ func (h *PromAPI) GetLabelValues(ctx context.Context, params promapi.GetLabelVal
 //
 // GET /api/v1/labels
 func (h *PromAPI) GetLabels(ctx context.Context, params promapi.GetLabelsParams) (*promapi.LabelsResponse, error) {
-	mint, err := parseOptTimestamp(params.Start, promapi.MinTime)
+	mint, err := ParseOptTimestamp(params.Start, promapi.MinTime)
 	if err != nil {
 		return nil, validationErr("parse start", err)
 	}
-	maxt, err := parseOptTimestamp(params.End, promapi.MaxTime)
+	maxt, err := ParseOptTimestamp(params.End, promapi.MaxTime)
 	if err != nil {
 		return nil, validationErr("parse end", err)
 	}
@@ -216,8 +224,6 @@ func (h *PromAPI) GetLabels(ctx context.Context, params promapi.GetLabelsParams)
 	)
 	grp, grpCtx := errgroup.WithContext(ctx)
 	for _, set := range sets {
-		set := set
-
 		grp.Go(func() error {
 			ctx := grpCtx
 
@@ -275,7 +281,7 @@ func (h *PromAPI) PostLabels(ctx context.Context, req *promapi.LabelsForm) (*pro
 //
 // GET /api/v1/query
 func (h *PromAPI) GetQuery(ctx context.Context, params promapi.GetQueryParams) (*promapi.QueryResponse, error) {
-	t, err := parseOptTimestamp(params.Time, time.Now())
+	t, err := ParseOptTimestamp(params.Time, time.Now())
 	if err != nil {
 		return nil, validationErr("parse time", err)
 	}
@@ -291,7 +297,14 @@ func (h *PromAPI) GetQuery(ctx context.Context, params promapi.GetQueryParams) (
 	}
 	defer q.Close()
 
+	span := trace.SpanFromContext(ctx)
+	span.AddEvent("executing_query", trace.WithAttributes(
+		xattribute.UnixNano("promapi.time", t),
+		attribute.String("promapi.query", q.String()),
+	))
 	r := q.Exec(ctx)
+
+	span.AddEvent("mapping_result")
 	return mapResult(rawQuery, r)
 }
 
@@ -315,15 +328,15 @@ func (h *PromAPI) PostQuery(ctx context.Context, req *promapi.QueryForm) (*proma
 //
 // GET /api/v1/query_range
 func (h *PromAPI) GetQueryRange(ctx context.Context, params promapi.GetQueryRangeParams) (*promapi.QueryResponse, error) {
-	start, err := parseTimestamp(params.Start)
+	start, err := ParseTimestamp(params.Start)
 	if err != nil {
 		return nil, validationErr("parse start", err)
 	}
-	end, err := parseTimestamp(params.End)
+	end, err := ParseTimestamp(params.End)
 	if err != nil {
 		return nil, validationErr("parse end", err)
 	}
-	step, err := parseStep(params.Step)
+	step, err := parseStep(params.Step.Or(""), h.defaultStep)
 	if err != nil {
 		return nil, validationErr("parse step", err)
 	}
@@ -344,7 +357,16 @@ func (h *PromAPI) GetQueryRange(ctx context.Context, params promapi.GetQueryRang
 	}
 	defer q.Close()
 
+	span := trace.SpanFromContext(ctx)
+	span.AddEvent("executing_query", trace.WithAttributes(
+		xattribute.UnixNano("promapi.start", start),
+		xattribute.UnixNano("promapi.end", end),
+		attribute.Stringer("promapi.step", step),
+		attribute.String("promapi.query", q.String()),
+	))
 	r := q.Exec(ctx)
+
+	span.AddEvent("mapping_result")
 	return mapResult(rawQuery, r)
 }
 
@@ -373,11 +395,11 @@ func (h *PromAPI) GetQueryExemplars(ctx context.Context, params promapi.GetQuery
 	if h.exemplars == nil {
 		return nil, ht.ErrNotImplemented
 	}
-	start, err := parseTimestamp(params.Start)
+	start, err := ParseTimestamp(params.Start)
 	if err != nil {
 		return nil, validationErr("parse start", err)
 	}
-	end, err := parseTimestamp(params.End)
+	end, err := ParseTimestamp(params.End)
 	if err != nil {
 		return nil, validationErr("parse end", err)
 	}
@@ -385,7 +407,7 @@ func (h *PromAPI) GetQueryExemplars(ctx context.Context, params promapi.GetQuery
 		err := errors.New("end timestamp must not be before start time")
 		return nil, validationErr("check range", err)
 	}
-	expr, err := parser.ParseExpr(params.Query)
+	expr, err := parser.NewParser(parser.Options{}).ParseExpr(params.Query)
 	if err != nil {
 		return nil, validationErr("parse query", err)
 	}
@@ -440,8 +462,34 @@ func (h *PromAPI) PostQueryExemplars(ctx context.Context, params *promapi.Exempl
 // GetMetadata implements getMetadata operation.
 //
 // GET /api/v1/metadata
-func (h *PromAPI) GetMetadata(context.Context, promapi.GetMetadataParams) (*promapi.MetadataResponse, error) {
-	return nil, ht.ErrNotImplemented
+func (h *PromAPI) GetMetadata(ctx context.Context, params promapi.GetMetadataParams) (*promapi.MetadataResponse, error) {
+	if h.metadata == nil {
+		return nil, ht.ErrNotImplemented
+	}
+
+	resp, err := h.metadata.MetricMetadata(ctx, metricstorage.MetadataParams{
+		MetricName: params.Metric.Or(""),
+		Limit:      params.Limit.Or(-1),
+	})
+	if err != nil {
+		return nil, executionErr("get metadata", err)
+	}
+
+	data := make(promapi.Metadata, len(resp))
+	for name, meta := range resp {
+		data[name] = []promapi.MetricMetadata{
+			{
+				Type: promapi.NewOptMetricMetadataType(meta.Type),
+				Help: promapi.NewOptString(meta.Help),
+				Unit: promapi.NewOptString(meta.Unit),
+			},
+		}
+	}
+
+	return &promapi.MetadataResponse{
+		Status: "success",
+		Data:   data,
+	}, nil
 }
 
 // GetRules implements getRules operation.
@@ -457,11 +505,11 @@ func (h *PromAPI) GetRules(context.Context, promapi.GetRulesParams) (*promapi.Ru
 //
 // GET /api/v1/series
 func (h *PromAPI) GetSeries(ctx context.Context, params promapi.GetSeriesParams) (*promapi.SeriesResponse, error) {
-	mint, err := parseOptTimestamp(params.Start, promapi.MinTime)
+	mint, err := ParseOptTimestamp(params.Start, promapi.MinTime)
 	if err != nil {
 		return nil, validationErr("parse start", err)
 	}
-	maxt, err := parseOptTimestamp(params.End, promapi.MaxTime)
+	maxt, err := ParseOptTimestamp(params.End, promapi.MaxTime)
 	if err != nil {
 		return nil, validationErr("parse end", err)
 	}
@@ -544,7 +592,6 @@ func (h *PromAPI) querySeries(
 			grp, grpCtx = errgroup.WithContext(ctx)
 		)
 		for i, mset := range matchers {
-			i, mset := i, mset
 			grp.Go(func() error {
 				ctx := grpCtx
 
@@ -599,33 +646,45 @@ func (h *PromAPI) querier(ctx context.Context, mint, maxt time.Time) (storage.Qu
 // NewError creates *FailStatusCode from error returned by handler.
 //
 // Used for common default response.
-func (h *PromAPI) NewError(_ context.Context, err error) *promapi.FailStatusCode {
+func (h *PromAPI) NewError(ctx context.Context, err error) *promapi.FailStatusCode {
+	if errors.Is(err, chstorage.ErrMetricsTooManySeries) {
+		return fail(ctx, promapi.FailErrorTypeExecution, err)
+	}
 	if _, ok := errors.Into[promql.ErrQueryCanceled](err); ok || errors.Is(err, context.Canceled) {
-		return fail(promapi.FailErrorTypeCanceled, err)
+		return fail(ctx, promapi.FailErrorTypeCanceled, err)
 	}
 	if _, ok := errors.Into[promql.ErrQueryTimeout](err); ok || errors.Is(err, context.DeadlineExceeded) {
-		return fail(promapi.FailErrorTypeTimeout, err)
+		return fail(ctx, promapi.FailErrorTypeTimeout, err)
 	}
 	if _, ok := errors.Into[promql.ErrStorage](err); ok {
-		return fail(promapi.FailErrorTypeInternal, err)
+		return fail(ctx, promapi.FailErrorTypeInternal, err)
 	}
 
 	if pe, ok := errors.Into[*PromError](err); ok {
-		return fail(pe.Kind, err)
+		return fail(ctx, pe.Kind, err)
 	}
 
-	return fail(promapi.FailErrorTypeInternal, err)
+	return fail(ctx, promapi.FailErrorTypeInternal, err)
 }
 
-func fail(kind promapi.FailErrorType, err error) *promapi.FailStatusCode {
+func fail(ctx context.Context, kind promapi.FailErrorType, err error) *promapi.FailStatusCode {
+	msg := appendTrace(ctx, err.Error())
 	return &promapi.FailStatusCode{
 		StatusCode: promapi.FailToCode(kind),
 		Response: promapi.Fail{
 			Status:    "error",
-			Error:     err.Error(),
+			Error:     msg,
 			ErrorType: kind,
 		},
 	}
+}
+
+func appendTrace(ctx context.Context, s string) string {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return s
+	}
+	return fmt.Sprintf("%s (trace_id=%s, span_id=%s)", s, sc.TraceID(), sc.SpanID())
 }
 
 // TimeoutMiddleware sets request timeout by given parameter, if set.
@@ -633,7 +692,7 @@ func TimeoutMiddleware() promapi.Middleware {
 	return func(req middleware.Request, next middleware.Next) (middleware.Response, error) {
 		q := req.Raw.URL.Query()
 		if q.Has("timeout") {
-			timeout, err := parseDuration(q.Get("timeout"))
+			timeout, err := ParseDuration(q.Get("timeout"))
 			if err != nil {
 				return middleware.Response{}, validationErr("parse timeout", err)
 			}

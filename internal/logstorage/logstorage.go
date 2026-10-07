@@ -5,8 +5,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/go-faster/oteldb/internal/iterators"
-	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/iterators"
+	"github.com/oteldb/oteldb/internal/logql"
 )
 
 // Querier is a logs storage query interface.
@@ -17,6 +17,10 @@ type Querier interface {
 	LabelValues(ctx context.Context, labelName string, opts LabelsOptions) (iterators.Iterator[Label], error)
 	// Series returns all available log series.
 	Series(ctx context.Context, opts SeriesOptions) (Series, error)
+	// DetectedLabels returns cardinality of all detected labels.
+	DetectedLabels(ctx context.Context, opts LabelsOptions) ([]DetectedLabel, error)
+	// DetectedFields returns detected fields with type and cardinality.
+	DetectedFields(ctx context.Context, opts LabelsOptions) ([]DetectedField, error)
 }
 
 // LabelsOptions defines options for [Querier.LabelNames] and [Querier.LabelValues] methods.
@@ -31,6 +35,10 @@ type LabelsOptions struct {
 	End time.Time
 	// Selector that selects the streams to match.
 	Query logql.Selector
+	// Limit sets maximum number of results.
+	//
+	// Querier ignores parameter, if it is zero.
+	Limit int
 }
 
 // SeriesOptions defines options for [Querier.Series] method.

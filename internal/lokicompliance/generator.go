@@ -97,7 +97,6 @@ func GenerateLogs(ctx context.Context, targets []string, opts GenerateOptions) e
 
 	grp, grpCtx := errgroup.WithContext(ctx)
 	for _, target := range targets {
-		target := target
 		grp.Go(func() error {
 			ctx := grpCtx
 			if err := sendLogs(ctx, opts.Client, target, req); err != nil {
@@ -198,9 +197,9 @@ func NewLogEntry(r *rand.Rand, ts time.Time) LogEntry {
 			plog.SeverityNumberFatal,
 		}),
 		Protocol: randomElement(r, []string{
-			semconv.HTTPFlavorHTTP10.Value.Emit(),
-			semconv.HTTPFlavorHTTP11.Value.Emit(),
-			semconv.HTTPFlavorHTTP20.Value.Emit(),
+			semconv.HTTPFlavorHTTP10.Value.String(),
+			semconv.HTTPFlavorHTTP11.Value.String(),
+			semconv.HTTPFlavorHTTP20.Value.String(),
 		}),
 		Method: randomElement(r, []string{
 			http.MethodGet,

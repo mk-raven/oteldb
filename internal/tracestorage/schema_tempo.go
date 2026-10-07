@@ -1,13 +1,15 @@
 package tracestorage
 
 import (
+	"encoding/json"
+	"fmt"
 	"slices"
 	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/tempoapi"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/tempoapi"
 )
 
 // FillTraceMetadata files TraceSearchMetadata fields using span.
@@ -44,6 +46,20 @@ func (span Span) AsTempoSpan() (s tempoapi.TempoSpan) {
 	return s
 }
 
+// AsTempoSpanFiltered is like [Span.AsTempoSpan], but only attributes whose
+// key is in allowed are converted.
+func (span Span) AsTempoSpanFiltered(allowed map[string]struct{}) (s tempoapi.TempoSpan) {
+	s = tempoapi.TempoSpan{
+		SpanID:            span.SpanID.Hex(),
+		Name:              tempoapi.NewOptString(span.Name),
+		StartTimeUnixNano: time.Unix(0, int64(span.Start)),
+		DurationNanos:     int64(span.End - span.Start),
+		Attributes:        nil,
+	}
+	ConvertToTempoAttrsFiltered(&s.Attributes, span.Attrs, allowed)
+	return s
+}
+
 // ConvertToTempoAttrs converts [otelstorage.Attrs] to Tempo API attributes.
 func ConvertToTempoAttrs(to *tempoapi.Attributes, from otelstorage.Attrs) {
 	if from.IsZero() {
@@ -52,6 +68,25 @@ func ConvertToTempoAttrs(to *tempoapi.Attributes, from otelstorage.Attrs) {
 	m := from.AsMap()
 	*to = slices.Grow(*to, m.Len())
 	m.Range(func(k string, v pcommon.Value) bool {
+		*to = append(*to, tempoapi.KeyValue{
+			Key:   k,
+			Value: otelToTempoValue(v),
+		})
+		return true
+	})
+}
+
+// ConvertToTempoAttrsFiltered is like [ConvertToTempoAttrs], but only
+// attributes whose key is in allowed are converted.
+func ConvertToTempoAttrsFiltered(to *tempoapi.Attributes, from otelstorage.Attrs, allowed map[string]struct{}) {
+	if from.IsZero() || len(allowed) == 0 {
+		return
+	}
+	m := from.AsMap()
+	m.Range(func(k string, v pcommon.Value) bool {
+		if _, ok := allowed[k]; !ok {
+			return true
+		}
 		*to = append(*to, tempoapi.KeyValue{
 			Key:   k,
 			Value: otelToTempoValue(v),
@@ -70,24 +105,19 @@ func otelToTempoValue(val pcommon.Value) (r tempoapi.AnyValue) {
 		r.SetIntValue(tempoapi.IntValue{IntValue: val.Int()})
 	case pcommon.ValueTypeDouble:
 		r.SetDoubleValue(tempoapi.DoubleValue{DoubleValue: val.Double()})
-	case pcommon.ValueTypeMap:
-		m := tempoapi.KvlistValue{}
-		val.Map().Range(func(k string, v pcommon.Value) bool {
-			m.KvlistValue = append(m.KvlistValue, tempoapi.KeyValue{
-				Key:   k,
-				Value: otelToTempoValue(v),
-			})
-			return true
-		})
-		r.SetKvlistValue(m)
-	case pcommon.ValueTypeSlice:
-		a := tempoapi.ArrayValue{}
-		ss := val.Slice()
-		for i := 0; i < ss.Len(); i++ {
-			v := ss.At(i)
-			a.ArrayValue = append(a.ArrayValue, otelToTempoValue(v))
+	case pcommon.ValueTypeMap, pcommon.ValueTypeSlice:
+		// Grafana search result transformation does not handle nested attributes
+		// and panics if it encounters one.
+		//
+		// See:
+		//  - https://github.com/grafana/grafana/blob/v13.0.1/pkg/tsdb/tempo/search.go#L569
+		//  - https://github.com/grafana/grafana/blob/v13.0.1/pkg/tsdb/tempo/search.go#L540
+		data, err := json.Marshal(val.AsRaw())
+		if err != nil {
+			r.SetStringValue(tempoapi.StringValue{StringValue: fmt.Sprintf("marshal %q: %s", val.Type(), err.Error())})
+		} else {
+			r.SetStringValue(tempoapi.StringValue{StringValue: string(data)})
 		}
-		r.SetArrayValue(a)
 	case pcommon.ValueTypeBytes:
 		r.SetBytesValue(tempoapi.BytesValue{BytesValue: val.Bytes().AsRaw()})
 	default:

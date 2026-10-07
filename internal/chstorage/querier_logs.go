@@ -3,21 +3,22 @@ package chstorage
 import (
 	"context"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/ch-go/proto"
 	"github.com/go-faster/errors"
-	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/exp/maps"
 
-	"github.com/go-faster/oteldb/internal/chstorage/chsql"
-	"github.com/go-faster/oteldb/internal/iterators"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine"
-	"github.com/go-faster/oteldb/internal/logstorage"
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/chstorage/chsql"
+	"github.com/oteldb/oteldb/internal/iterators"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine"
+	"github.com/oteldb/oteldb/internal/logstorage"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/xspan"
 )
 
 var (
@@ -25,7 +26,7 @@ var (
 	_ logqlengine.Querier = (*Querier)(nil)
 )
 
-// LabelNames implements logstorage.Querier.
+// LabelNames implements [logstorage.Querier].
 func (q *Querier) LabelNames(ctx context.Context, opts logstorage.LabelsOptions) (result []string, rerr error) {
 	table := q.tables.Logs
 
@@ -33,12 +34,15 @@ func (q *Querier) LabelNames(ctx context.Context, opts logstorage.LabelsOptions)
 		trace.WithAttributes(
 			xattribute.UnixNano("chstorage.range.start", opts.Start),
 			xattribute.UnixNano("chstorage.range.end", opts.End),
+			attribute.Stringer("chstorage.matchers", opts.Query),
+			attribute.Int("chstorage.limit", opts.Limit),
+
 			attribute.String("chstorage.table", table),
 		),
 	)
 	defer func() {
 		if rerr != nil {
-			span.RecordError(rerr)
+			xspan.Fail(span, rerr)
 		} else {
 			span.AddEvent("names_fetched", trace.WithAttributes(
 				attribute.Int("chstorage.total_names", len(result)),
@@ -47,6 +51,25 @@ func (q *Querier) LabelNames(ctx context.Context, opts logstorage.LabelsOptions)
 		span.End()
 	}()
 
+	limit := q.labelLimit
+	if l := opts.Limit; l > 0 && l < limit {
+		limit = l
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	queryLabels := make([]string, 0, len(opts.Query.Matchers))
+	for _, m := range opts.Query.Matchers {
+		queryLabels = append(queryLabels, string(m.Label))
+	}
+	mapping, err := q.getLabelMapping(ctx, queryLabels)
+	if err != nil {
+		return nil, errors.Wrap(err, "get label mapping")
+	}
+	resourceQuery := q.deduplicatedResource(table, opts.Start, opts.End)
+	for _, m := range opts.Query.Matchers {
+		resourceQuery.Where(q.logQLLabelMatcher(m, mapping))
+	}
 	var (
 		name  proto.ColStr
 		dedup = map[string]struct{}{
@@ -54,6 +77,7 @@ func (q *Querier) LabelNames(ctx context.Context, opts logstorage.LabelsOptions)
 			logstorage.LabelTraceID:           {},
 			logstorage.LabelSpanID:            {},
 			logstorage.LabelSeverity:          {},
+			logstorage.LabelDetectedLevel:     {},
 			logstorage.LabelBody:              {},
 			logstorage.LabelServiceName:       {},
 			logstorage.LabelServiceInstanceID: {},
@@ -63,14 +87,14 @@ func (q *Querier) LabelNames(ctx context.Context, opts logstorage.LabelsOptions)
 	if err := q.do(ctx, selectQuery{
 		Query: chsql.SelectFrom(
 			// Select deduplicated resources from subquery.
-			q.deduplicatedResource(table, opts.Start, opts.End),
+			resourceQuery,
 			chsql.ResultColumn{
 				Name: "name",
 				Expr: chsql.ArrayJoin(attrKeys(colResource)),
 				Data: &name,
 			}).
 			Distinct(true).
-			Limit(q.labelLimit),
+			Limit(limit),
 		OnResult: func(ctx context.Context, block proto.Block) error {
 			for i := 0; i < name.Rows(); i++ {
 				// TODO: add configuration option
@@ -112,9 +136,10 @@ func (l *labelStaticIterator) Next(t *logstorage.Label) bool {
 func (l *labelStaticIterator) Err() error   { return nil }
 func (l *labelStaticIterator) Close() error { return nil }
 
-// LabelValues implements logstorage.Querier.
+// LabelValues implements [logstorage.Querier].
 func (q *Querier) LabelValues(ctx context.Context, labelName string, opts logstorage.LabelsOptions) (riter iterators.Iterator[logstorage.Label], rerr error) {
 	table := q.tables.Logs
+	labelName = otelstorage.UnescapeLabelName(labelName)
 
 	ctx, span := q.tracer.Start(ctx, "chstorage.logs.LabelValues",
 		trace.WithAttributes(
@@ -122,34 +147,33 @@ func (q *Querier) LabelValues(ctx context.Context, labelName string, opts logsto
 			xattribute.UnixNano("chstorage.range.start", opts.Start),
 			xattribute.UnixNano("chstorage.range.end", opts.End),
 			attribute.Stringer("chstorage.matchers", opts.Query),
+			attribute.Int("chstorage.limit", opts.Limit),
 
 			attribute.String("chstorage.table", table),
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
+	limit := q.labelLimit
+	if l := opts.Limit; l > 0 && l < limit {
+		limit = l
+	}
+	if limit < 0 {
+		limit = 0
+	}
 	var values []string
 	switch labelName {
 	case logstorage.LabelBody, logstorage.LabelSpanID, logstorage.LabelTraceID:
-	case logstorage.LabelSeverity:
-		// FIXME(tdakkota): do a proper query with filtering
-		values = []string{
-			plog.SeverityNumberUnspecified.String(),
-			plog.SeverityNumberTrace.String(),
-			plog.SeverityNumberDebug.String(),
-			plog.SeverityNumberInfo.String(),
-			plog.SeverityNumberWarn.String(),
-			plog.SeverityNumberError.String(),
-			plog.SeverityNumberFatal.String(),
+	case logstorage.LabelSeverity, logstorage.LabelDetectedLevel:
+		got, err := q.levelValues(ctx, opts, limit)
+		if err != nil {
+			return nil, errors.Wrap(err, "level values")
 		}
-		slices.Sort(values)
+		values = got
 	default:
-		queryLabels := make([]string, 1+len(opts.Query.Matchers))
+		queryLabels := make([]string, 0, 1+len(opts.Query.Matchers))
 		queryLabels = append(queryLabels, labelName)
 		for _, m := range opts.Query.Matchers {
 			queryLabels = append(queryLabels, string(m.Label))
@@ -179,7 +203,7 @@ func (q *Querier) LabelValues(ctx context.Context, labelName string, opts logsto
 				}).
 				Distinct(true).
 				Order(chsql.Ident("value"), chsql.Asc).
-				Limit(q.labelLimit)
+				Limit(limit)
 		)
 		if err := q.do(ctx, selectQuery{
 			Query: query,
@@ -199,14 +223,247 @@ func (q *Querier) LabelValues(ctx context.Context, labelName string, opts logsto
 			return nil, err
 		}
 	}
-
 	span.AddEvent("values_fetched", trace.WithAttributes(
 		attribute.Int("chstorage.total_values", len(values)),
 	))
+
 	return &labelStaticIterator{
 		name:   labelName,
 		values: values,
 	}, nil
+}
+
+// DetectedLabels implements [logstorage.Querier].
+func (q *Querier) DetectedLabels(ctx context.Context, opts logstorage.LabelsOptions) (values []logstorage.DetectedLabel, rerr error) {
+	table := q.tables.Logs
+
+	ctx, span := q.tracer.Start(ctx, "chstorage.logs.DetectedLabels",
+		trace.WithAttributes(
+			xattribute.UnixNano("chstorage.range.start", opts.Start),
+			xattribute.UnixNano("chstorage.range.end", opts.End),
+			attribute.Stringer("chstorage.matchers", opts.Query),
+			attribute.Int("chstorage.limit", opts.Limit),
+
+			attribute.String("chstorage.table", table),
+		),
+	)
+	defer func() {
+		xspan.End(span, rerr)
+	}()
+
+	limit := q.labelLimit
+	if l := opts.Limit; l > 0 && l < limit {
+		limit = l
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	queryLabels := make([]string, 0, len(opts.Query.Matchers))
+	for _, m := range opts.Query.Matchers {
+		queryLabels = append(queryLabels, string(m.Label))
+	}
+	mapping, err := q.getLabelMapping(ctx, queryLabels)
+	if err != nil {
+		return nil, errors.Wrap(err, "get label mapping")
+	}
+	subQuery := q.deduplicatedResource(
+		table,
+		opts.Start, opts.End,
+	)
+	for _, m := range opts.Query.Matchers {
+		subQuery.Where(q.logQLLabelMatcher(m, mapping))
+	}
+
+	var (
+		series = proto.NewMap(
+			new(proto.ColStr),
+			new(proto.ColStr),
+		)
+
+		query = chsql.SelectFrom(subQuery, chsql.ResultColumn{
+			Name: "series",
+			Expr: attrStringMap(colResource),
+			Data: series,
+		}).
+			Distinct(true).
+			Limit(limit)
+	)
+
+	dedup := map[string]map[string]struct{}{}
+	if err := q.do(ctx, selectQuery{
+		Query: query,
+		OnResult: func(ctx context.Context, block proto.Block) error {
+			for i := 0; i < series.Rows(); i++ {
+				forEachColMap(series, i, func(k, v string) {
+					if k == "" {
+						return
+					}
+					key := otelstorage.KeyToLabel(k)
+					valueSet, ok := dedup[key]
+					if !ok {
+						valueSet = map[string]struct{}{}
+						dedup[key] = valueSet
+					}
+					valueSet[v] = struct{}{}
+				})
+			}
+			return nil
+		},
+
+		Type:   "DetectedLabels",
+		Signal: "logs",
+		Table:  table,
+	}); err != nil {
+		return nil, err
+	}
+
+	materialized := q.getMaterializedLabelNames()
+	values = make([]logstorage.DetectedLabel, 0, len(dedup)+len(materialized))
+	for k, valueSet := range dedup {
+		values = append(values, logstorage.DetectedLabel{
+			Name:        k,
+			Cardinality: len(valueSet),
+		})
+	}
+	for _, k := range q.getMaterializedLabelNames() {
+		if _, ok := dedup[k]; ok {
+			continue
+		}
+		values = append(values, logstorage.DetectedLabel{
+			Name:        k,
+			Cardinality: 1,
+		})
+	}
+	slices.SortFunc(values, func(a, b logstorage.DetectedLabel) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	span.AddEvent("values_fetched", trace.WithAttributes(
+		attribute.Int("chstorage.total_values", len(values)),
+	))
+
+	return values, nil
+}
+
+// DetectedFields implements [logstorage.Querier].
+func (q *Querier) DetectedFields(ctx context.Context, opts logstorage.LabelsOptions) (values []logstorage.DetectedField, rerr error) {
+	table := q.tables.Logs
+
+	ctx, span := q.tracer.Start(ctx, "chstorage.logs.DetectedFields",
+		trace.WithAttributes(
+			xattribute.UnixNano("chstorage.range.start", opts.Start),
+			xattribute.UnixNano("chstorage.range.end", opts.End),
+			attribute.Stringer("chstorage.matchers", opts.Query),
+			attribute.Int("chstorage.limit", opts.Limit),
+
+			attribute.String("chstorage.table", table),
+		),
+	)
+	defer func() {
+		xspan.End(span, rerr)
+	}()
+
+	limit := q.labelLimit
+	if l := opts.Limit; l > 0 && l < limit {
+		limit = l
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	queryLabels := make([]string, 0, len(opts.Query.Matchers))
+	for _, m := range opts.Query.Matchers {
+		queryLabels = append(queryLabels, string(m.Label))
+	}
+	mapping, err := q.getLabelMapping(ctx, queryLabels)
+	if err != nil {
+		return nil, errors.Wrap(err, "get label mapping")
+	}
+
+	// Deduplicate by resource first (LowCardinality — few distinct values), then explode
+	// key-value pairs using arrayZip so each key stays paired with its value.
+	// WITH defines the tuple alias once and re-uses it in both SELECT columns.
+	innerQuery := chsql.Select(table,
+		chsql.ResultColumn{
+			Name: "pairs",
+			Expr: chsql.MapConcat(
+				q.getMaterializedLabelMap(),
+				attrStringMap(colResource),
+			),
+		},
+	).GroupBy(
+		chsql.Ident(colResource),
+		chsql.Ident("service_name"),
+		chsql.Ident("service_instance_id"),
+		chsql.Ident("service_namespace"),
+		chsql.Ident("severity_text"),
+	).
+		Where(chsql.InTimeRange("timestamp", opts.Start, opts.End, proto.PrecisionNano))
+	for _, m := range opts.Query.Matchers {
+		innerQuery.Where(q.logQLLabelMatcher(m, mapping))
+	}
+
+	var (
+		name        proto.ColStr
+		cardinality proto.ColUInt64
+
+		query = chsql.SelectFrom(innerQuery,
+			chsql.ResultColumn{
+				Name: "label",
+				Expr: chsql.Function("tupleElement", chsql.Ident("tuple"), chsql.Integer(1)),
+				Data: &name,
+			},
+			chsql.ResultColumn{
+				Name: "cardinality",
+				Expr: chsql.Function("uniq",
+					chsql.Function("tupleElement", chsql.Ident("tuple"), chsql.Integer(2)),
+				),
+				Data: &cardinality,
+			},
+		).
+			With("tuple", chsql.ArrayJoin(
+				chsql.Function("arrayZip",
+					chsql.Function("mapKeys", chsql.Ident("pairs")),
+					chsql.Function("mapValues", chsql.Ident("pairs")),
+				),
+			)).
+			GroupBy(chsql.Ident("label")).
+			Limit(limit)
+	)
+
+	seen := map[string]struct{}{}
+	if err := q.do(ctx, selectQuery{
+		Query: query,
+		OnResult: func(ctx context.Context, block proto.Block) error {
+			for i := 0; i < name.Rows(); i++ {
+				k := otelstorage.KeyToLabel(name.Row(i))
+				if k == "" {
+					continue
+				}
+				seen[k] = struct{}{}
+				values = append(values, logstorage.DetectedField{
+					Name:        k,
+					Type:        "string",
+					Cardinality: cardinality.Row(i),
+				})
+			}
+			return nil
+		},
+
+		Type:   "DetectedFields",
+		Signal: "logs",
+		Table:  table,
+	}); err != nil {
+		return nil, err
+	}
+
+	slices.SortFunc(values, func(a, b logstorage.DetectedField) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	span.AddEvent("fields_fetched", trace.WithAttributes(
+		attribute.Int("chstorage.total_fields", len(values)),
+	))
+	return values, nil
 }
 
 func (q *Querier) getLabelMapping(ctx context.Context, labels []string) (_ map[string]string, rerr error) {
@@ -219,10 +476,7 @@ func (q *Querier) getLabelMapping(ctx context.Context, labels []string) (_ map[s
 		),
 	)
 	defer func() {
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	var (
@@ -264,13 +518,35 @@ func (q *Querier) getLabelMapping(ctx context.Context, labels []string) (_ map[s
 	return out, nil
 }
 
+func (q *Querier) getMaterializedLabelNames() []string {
+	return []string{
+		logstorage.LabelSeverity,
+		logstorage.LabelDetectedLevel,
+		logstorage.LabelServiceName,
+		logstorage.LabelServiceInstanceID,
+		logstorage.LabelServiceNamespace,
+	}
+}
+
+func (q *Querier) getMaterializedLabelMap() chsql.Expr {
+	var (
+		materialized = q.getMaterializedLabelNames()
+		entries      = make([]chsql.Expr, 0, len(materialized)*2)
+	)
+	for _, label := range materialized {
+		expr, _ := q.getMaterializedLabelColumn(label)
+		entries = append(entries, chsql.String(label), expr)
+	}
+	return chsql.Map(entries...)
+}
+
 func (q *Querier) getMaterializedLabelColumn(labelName string) (column chsql.Expr, isColumn bool) {
 	switch labelName {
 	case logstorage.LabelTraceID:
 		return chsql.Hex(chsql.Ident("trace_id")), true
 	case logstorage.LabelSpanID:
 		return chsql.Hex(chsql.Ident("span_id")), true
-	case logstorage.LabelSeverity:
+	case logstorage.LabelSeverity, logstorage.LabelDetectedLevel:
 		return chsql.Ident("severity_text"), true
 	case logstorage.LabelBody:
 		return chsql.Ident("body"), true
@@ -296,7 +572,7 @@ func (q *Querier) Series(ctx context.Context, opts logstorage.SeriesOptions) (re
 	)
 	defer func() {
 		if rerr != nil {
-			span.RecordError(rerr)
+			xspan.Fail(span, rerr)
 		} else {
 			span.AddEvent("series_fetched", trace.WithAttributes(
 				attribute.Int("chstorage.total_series", len(result)),
@@ -304,25 +580,6 @@ func (q *Querier) Series(ctx context.Context, opts logstorage.SeriesOptions) (re
 		}
 		span.End()
 	}()
-
-	var materializedMap chsql.Expr
-	{
-		var (
-			materialized = []string{
-				logstorage.LabelSeverity,
-				logstorage.LabelServiceName,
-				logstorage.LabelServiceInstanceID,
-				logstorage.LabelServiceNamespace,
-			}
-			entries = make([]chsql.Expr, 0, len(materialized)*2)
-		)
-		for _, label := range materialized {
-			expr, _ := q.getMaterializedLabelColumn(label)
-			entries = append(entries, chsql.String(label), expr)
-		}
-
-		materializedMap = chsql.Map(entries...)
-	}
 
 	var (
 		series = proto.NewMap(
@@ -333,13 +590,13 @@ func (q *Querier) Series(ctx context.Context, opts logstorage.SeriesOptions) (re
 		query = chsql.Select(table, chsql.ResultColumn{
 			Name: "series",
 			Expr: chsql.MapConcat(
-				materializedMap,
+				q.getMaterializedLabelMap(),
 				attrStringMap(colResource),
 			),
 			Data: series,
 		}).
 			Distinct(true).
-			Where(chsql.InTimeRange("timestamp", opts.Start, opts.End))
+			Where(chsql.InTimeRange("timestamp", opts.Start, opts.End, proto.PrecisionNano))
 	)
 	if sels := opts.Selectors; len(sels) > 0 {
 		// Gather all labels for mapping fetch.
@@ -399,7 +656,7 @@ func (q *Querier) deduplicatedResource(table string, start, end time.Time) *chsq
 	// See https://github.com/ClickHouse/ClickHouse/issues/4670
 	return chsql.Select(table, chsql.Column(colResource, nil)).
 		GroupBy(chsql.Ident(colResource)).
-		Where(chsql.InTimeRange("timestamp", start, end))
+		Where(chsql.InTimeRange("timestamp", start, end, proto.PrecisionNano))
 }
 
 func forEachColMap[K comparable, V any](c *proto.ColMap[K, V], row int, cb func(K, V)) {

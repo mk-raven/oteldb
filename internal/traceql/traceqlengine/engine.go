@@ -11,10 +11,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/go-faster/oteldb/internal/tempoapi"
-	"github.com/go-faster/oteldb/internal/traceql"
-	"github.com/go-faster/oteldb/internal/tracestorage"
-	"github.com/go-faster/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/tempoapi"
+	"github.com/oteldb/oteldb/internal/traceql"
+	"github.com/oteldb/oteldb/internal/tracestorage"
+	"github.com/oteldb/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/xspan"
 )
 
 // Engine is a TraceQL evaluation engine.
@@ -71,7 +72,7 @@ func (e *Engine) Eval(ctx context.Context, query string, params EvalParams) (tra
 	)
 	defer func() {
 		if rerr != nil {
-			span.RecordError(rerr)
+			xspan.Fail(span, rerr)
 		} else if traces != nil {
 			var spans int
 			for _, m := range traces.Traces {
@@ -98,6 +99,9 @@ func (e *Engine) evalExpr(ctx context.Context, expr traceql.Expr, params EvalPar
 	if err != nil {
 		return nil, errors.Wrap(err, "build pipeline")
 	}
+	// Only propagate attributes actually referenced by the query, matching
+	// Tempo's search API behavior. See [referencedAttributes].
+	allowedAttrs := referencedAttributes(expr)
 
 	iter, err := e.querier.SelectSpansets(
 		ctx,
@@ -134,25 +138,31 @@ func (e *Engine) evalExpr(ctx context.Context, expr traceql.Expr, params EvalPar
 		}
 
 		var (
-			root  = elem.Spans[0]
-			start = root.Start.AsTime()
-			end   = root.End.AsTime()
+			// The trace's root is its parentless span, if it has one at all: a trace whose root was
+			// never ingested (or starts outside the query window) has no root name or service, exactly
+			// as Tempo reports it. The extent is taken over every span either way.
+			root  *tracestorage.Span
+			start = elem.Spans[0].Start.AsTime()
+			end   = elem.Spans[0].End.AsTime()
 		)
-		for _, span := range elem.Spans[1:] {
+		for i, span := range elem.Spans {
 			if st := span.Start.AsTime(); st.Before(start) {
 				start = st
 			}
 			if et := span.End.AsTime(); et.After(end) {
 				end = et
 			}
-			if !root.ParentSpanID.IsEmpty() && span.ParentSpanID.IsEmpty() {
-				root = span
+			if root == nil && span.ParentSpanID.IsEmpty() {
+				root = &elem.Spans[i]
 			}
 		}
 
-		var rootServiceName string
-		if name, ok := root.ServiceName(); ok {
-			rootServiceName = name
+		var rootSpanName, rootServiceName string
+		if root != nil {
+			rootSpanName = root.Name
+			if name, ok := root.ServiceName(); ok {
+				rootServiceName = name
+			}
 		}
 
 		if !tr.within(start, end) {
@@ -164,7 +174,7 @@ func (e *Engine) evalExpr(ctx context.Context, expr traceql.Expr, params EvalPar
 			{
 				TraceID:         elem.TraceID,
 				Spans:           elem.Spans,
-				RootSpanName:    root.Name,
+				RootSpanName:    rootSpanName,
 				RootServiceName: rootServiceName,
 				Start:           start,
 				TraceDuration:   end.Sub(start),
@@ -184,12 +194,15 @@ func (e *Engine) evalExpr(ctx context.Context, expr traceql.Expr, params EvalPar
 
 			var spans tempoapi.TempoSpanSet
 			for _, span := range s.Spans {
-				spans.Spans = append(spans.Spans, span.AsTempoSpan())
+				spans.Spans = append(spans.Spans, span.AsTempoSpanFiltered(allowedAttrs))
 			}
 
-			// Add attributes from root.
-			tracestorage.ConvertToTempoAttrs(&spans.Attributes, root.ScopeAttrs)
-			tracestorage.ConvertToTempoAttrs(&spans.Attributes, root.ResourceAttrs)
+			// Add attributes from root, referenced by the query only. A trace without a root span
+			// contributes none, as it contributes no root name or service.
+			if root != nil {
+				tracestorage.ConvertToTempoAttrsFiltered(&spans.Attributes, root.ScopeAttrs, allowedAttrs)
+				tracestorage.ConvertToTempoAttrsFiltered(&spans.Attributes, root.ResourceAttrs, allowedAttrs)
+			}
 			result = append(result, tempoapi.TraceSearchMetadata{
 				TraceID:           s.TraceID.Hex(),
 				RootServiceName:   tempoapi.NewOptString(s.RootServiceName),
@@ -197,6 +210,7 @@ func (e *Engine) evalExpr(ctx context.Context, expr traceql.Expr, params EvalPar
 				StartTimeUnixNano: s.Start,
 				DurationMs:        tempoapi.NewOptInt(int(s.TraceDuration.Milliseconds())),
 				SpanSet:           tempoapi.NewOptTempoSpanSet(spans),
+				SpanSets:          []tempoapi.TempoSpanSet{spans},
 			})
 		}
 	}
@@ -207,7 +221,10 @@ func (e *Engine) evalExpr(ctx context.Context, expr traceql.Expr, params EvalPar
 	slices.SortFunc(result, func(a, b tempoapi.TraceSearchMetadata) int {
 		return a.StartTimeUnixNano.Compare(b.StartTimeUnixNano)
 	})
-	return &tempoapi.Traces{Traces: result}, nil
+	return &tempoapi.Traces{
+		Traces:  result,
+		Metrics: tempoapi.NewOptSearchMetrics(tempoapi.SearchMetrics{}),
+	}, nil
 }
 
 type timeRange struct {

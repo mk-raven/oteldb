@@ -9,33 +9,29 @@ import (
 	"time"
 
 	"github.com/go-faster/errors"
-	"github.com/go-faster/jx"
 	sdkapp "github.com/go-faster/sdk/app"
 	"github.com/go-faster/sdk/zctx"
-	"github.com/ogen-go/ogen/ogenerrors"
-	"github.com/prometheus/prometheus/promql"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/confmap/provider/envprovider"
+	"go.opentelemetry.io/collector/featuregate"
 	"go.opentelemetry.io/collector/otelcol"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/exp/maps"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/go-faster/oteldb/internal/chembed"
-	"github.com/go-faster/oteldb/internal/chstorage"
-	"github.com/go-faster/oteldb/internal/httpmiddleware"
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine"
-	"github.com/go-faster/oteldb/internal/lokiapi"
-	"github.com/go-faster/oteldb/internal/lokihandler"
-	"github.com/go-faster/oteldb/internal/otelreceiver"
-	"github.com/go-faster/oteldb/internal/promapi"
-	"github.com/go-faster/oteldb/internal/promhandler"
-	"github.com/go-faster/oteldb/internal/tempoapi"
-	"github.com/go-faster/oteldb/internal/tempohandler"
-	"github.com/go-faster/oteldb/internal/traceql/traceqlengine"
+	"github.com/oteldb/oteldb/internal/chembed"
+	"github.com/oteldb/oteldb/internal/chstorage"
+	"github.com/oteldb/oteldb/internal/config"
+	"github.com/oteldb/oteldb/internal/httpmiddleware"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine"
+	"github.com/oteldb/oteldb/internal/otelreceiver"
+	"github.com/oteldb/oteldb/internal/promhandler"
+	"github.com/oteldb/oteldb/internal/queryapi"
+	"github.com/oteldb/oteldb/internal/scarecrow"
+	"github.com/oteldb/oteldb/internal/storagebackend"
 )
 
 // App contains application dependencies and services.
@@ -46,21 +42,37 @@ type App struct {
 	shutdown func()
 	otelStorage
 
-	lg      *zap.Logger
-	metrics *sdkapp.Telemetry
+	// metricsSink/tracesSink/logsSink, when set, route the corresponding signal's ingestion to
+	// the embedded storage engine instead of ClickHouse (see [MetricsBackendStorage]).
+	metricsSink  otelreceiver.MetricsSink
+	tracesSink   otelreceiver.TracesSink
+	logsSink     otelreceiver.LogsSink
+	profilesSink otelreceiver.ProfilesSink
+
+	// storageBackend is the embedded storage engine, set when any signal is served from it. It backs
+	// the admin panel's first-class storage view. Nil when every signal is on ClickHouse.
+	storageBackend *storagebackend.Backend
+
+	lg        *zap.Logger
+	telemetry *sdkapp.Telemetry
+	startTime time.Time
 }
 
 func newApp(ctx context.Context, cfg Config, m *sdkapp.Telemetry) (_ *App, err error) {
 	cfg.setDefaults()
 
 	app := &App{
-		cfg:      cfg,
-		services: map[string]func(context.Context) error{},
-		lg:       zctx.From(ctx),
-		metrics:  m,
+		cfg:       cfg,
+		services:  map[string]func(context.Context) error{},
+		lg:        zctx.From(ctx),
+		telemetry: m,
+		startTime: time.Now(),
 	}
 
-	{
+	// ClickHouse is started only when a queryable signal is still served by it. Under --embedded
+	// (every signal on the embedded storage engine) ClickHouse is skipped entirely, including the
+	// zero-config embedded ClickHouse, and no DSN is required.
+	if cfg.needsClickHouse() {
 		dsn := os.Getenv("CH_DSN")
 		if dsn == "" {
 			dsn = cfg.DSN
@@ -75,14 +87,66 @@ func newApp(ctx context.Context, cfg Config, m *sdkapp.Telemetry) (_ *App, err e
 			}
 			app.lg.Info("Embedded ClickHouse started")
 		}
-		store, err := setupCH(ctx, dsn, cfg.TTL, app.lg, m)
+
+		switch replicated := os.Getenv("CH_REPLICATED"); strings.ToLower(replicated) {
+		case "y", "yes", "t", "true", "on", "1":
+			cfg.Replicated = true
+		case "n", "no", "f", "false", "off", "0":
+			cfg.Replicated = false
+		}
+		if cluster := os.Getenv("CH_CLUSTER"); cluster != "" {
+			cfg.Cluster = cluster
+		}
+
+		store, err := setupCH(ctx, dsn, cfg, app.lg, m)
 		if err != nil {
 			return nil, errors.Wrapf(err, "create storage")
 		}
 		app.otelStorage = store
+	} else {
+		app.lg.Info("ClickHouse disabled; serving all signals from the embedded storage engine")
 	}
 
-	app.setupHealthCheck()
+	// Optionally swap one or more signals onto the embedded storage engine. A single shared
+	// engine instance backs every signal selected via the *_backend config; the rest stay on
+	// ClickHouse. For each swapped signal both the query side (the API handler's querier) and
+	// the ingestion side (the collector exporter's sink) are replaced.
+	if cfg.usesStorageBackend() {
+		b, closeStore, err := storagebackend.Open(ctx, cfg.Storage, app.lg.Named("storage"), app.telemetry)
+		if err != nil {
+			return nil, errors.Wrap(err, "setup storage backend")
+		}
+		app.storageBackend = b
+		if cfg.MetricsBackend == MetricsBackendStorage {
+			app.metricsQuerier = b
+			app.metricsSink = b
+		}
+		if cfg.TracesBackend == MetricsBackendStorage {
+			app.traceQuerier = b.Traces()
+			app.tracesSink = b
+		}
+		if cfg.LogsBackend == MetricsBackendStorage {
+			app.logQuerier = b.Logs()
+			app.logsSink = b
+		}
+		if cfg.ProfilesBackend == MetricsBackendStorage {
+			app.profileQuerier = b.Profiles()
+			app.profilesSink = b
+		}
+		app.services["storage"] = func(ctx context.Context) error {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := closeStore(shutdownCtx); err != nil {
+				return errors.Wrap(err, "close storage")
+			}
+			return nil
+		}
+	}
+
+	if err := app.setupHealthCheck(); err != nil {
+		return nil, errors.Wrap(err, "healthcheck")
+	}
 	if err := app.setupCollector(); err != nil {
 		return nil, errors.Wrap(err, "otelcol")
 	}
@@ -93,7 +157,13 @@ func newApp(ctx context.Context, cfg Config, m *sdkapp.Telemetry) (_ *App, err e
 		return nil, errors.Wrap(err, "loki")
 	}
 	if err := app.trySetupProm(); err != nil {
-		return nil, errors.Wrap(err, "prom")
+		return nil, errors.Wrap(err, "prometheus")
+	}
+	if err := app.trySetupPyroscope(); err != nil {
+		return nil, errors.Wrap(err, "pyroscope")
+	}
+	if err := app.setupAdmin(); err != nil {
+		return nil, errors.Wrap(err, "admin")
 	}
 
 	return app, nil
@@ -110,6 +180,8 @@ func addOgen[
 	name string,
 	server Server,
 	defaultPort string,
+	authCfg []AuthConfig,
+	additionalMiddlewares ...httpmiddleware.Middleware,
 ) {
 	lg := app.lg.Named(name)
 
@@ -118,20 +190,30 @@ func addOgen[
 		addr = defaultPort
 	}
 
+	if authCfg == nil {
+		authCfg = app.cfg.Auth
+	}
+
 	app.services[name] = func(ctx context.Context) error {
 		lg := lg.With(zap.String("addr", addr))
 		lg.Info("Starting HTTP server")
 
-		routeFinder := httpmiddleware.MakeRouteFinder(server)
-		httpServer := &http.Server{
-			Addr: addr,
-			Handler: httpmiddleware.Wrap(server,
-				httpmiddleware.InjectLogger(zctx.From(ctx)),
-				httpmiddleware.Instrument("oteldb."+name, routeFinder, app.metrics),
-				httpmiddleware.LogRequests(routeFinder),
-			),
-			ReadHeaderTimeout: 15 * time.Second,
+		middlewares := additionalMiddlewares
+		auth, err := config.AuthMiddleware(authCfg)
+		if err != nil {
+			return errors.Wrap(err, "create auth middlewares")
 		}
+		if auth != nil {
+			lg.Info("Enabling authentication middleware", zap.Int("configs", len(authCfg)))
+			middlewares = append([]httpmiddleware.Middleware{auth}, middlewares...)
+		}
+
+		httpServer := queryapi.HTTPServer(queryapi.ServerOptions{
+			Name:    name,
+			Addr:    addr,
+			Logger:  zctx.From(ctx),
+			Metrics: app.telemetry,
+		}, server, middlewares...)
 
 		parentCtx := ctx
 		g, ctx := errgroup.WithContext(ctx)
@@ -163,22 +245,41 @@ func (app *App) trySetupTempo() error {
 		return nil
 	}
 	cfg := app.cfg.Tempo
-	cfg.setDefaults()
+	cfg.SetDefaults()
 
-	engine := traceqlengine.NewEngine(app.traceQuerier, traceqlengine.Options{
-		TracerProvider: app.metrics.TracerProvider(),
+	s, err := queryapi.NewTempo(queryapi.TempoOptions{
+		Querier:        q,
+		TracerProvider: app.telemetry.TracerProvider(),
+		MeterProvider:  app.telemetry.MeterProvider(),
 	})
-	tempo := tempohandler.NewTempoAPI(q, engine, tempohandler.TempoAPIOptions{})
-
-	s, err := tempoapi.NewServer(tempo,
-		tempoapi.WithTracerProvider(app.metrics.TracerProvider()),
-		tempoapi.WithMeterProvider(app.metrics.MeterProvider()),
-	)
 	if err != nil {
 		return err
 	}
 
-	addOgen[tempoapi.Route](app, "tempo", s, cfg.Bind)
+	addOgen(app, "tempo", s, cfg.Bind, cfg.Auth)
+	return nil
+}
+
+func (app *App) trySetupPyroscope() error {
+	q := app.profileQuerier
+	if q == nil {
+		// Profiles storage backend is not wired in yet (deferred to
+		// oteldb/storage); skip the Pyroscope API.
+		return nil
+	}
+	cfg := app.cfg.Pyroscope
+	cfg.SetDefaults()
+
+	s, connectMount, err := queryapi.NewPyroscope(queryapi.PyroscopeOptions{
+		Querier:        q,
+		TracerProvider: app.telemetry.TracerProvider(),
+		MeterProvider:  app.telemetry.MeterProvider(),
+	})
+	if err != nil {
+		return err
+	}
+
+	addOgen(app, "pyroscope", s, cfg.Bind, cfg.Auth, connectMount)
 	return nil
 }
 
@@ -187,51 +288,30 @@ func (app *App) trySetupLoki() error {
 	if q == nil {
 		return nil
 	}
-	cfg := app.cfg.LokiConfig
-	cfg.setDefaults()
+	cfg := app.cfg.Loki
+	cfg.SetDefaults()
 
-	var optimizers []logqlengine.Optimizer
-	optimizers = append(optimizers, logqlengine.DefaultOptimizers()...)
-	optimizers = append(optimizers, &chstorage.ClickhouseOptimizer{})
-	engine, err := logqlengine.NewEngine(q, logqlengine.Options{
-		ParseOptions: logql.ParseOptions{
-			AllowDots: true,
-		},
-		LookbackDuration: cfg.LookbackDelta,
-		Optimizers:       optimizers,
-		MeterProvider:    app.metrics.MeterProvider(),
-		TracerProvider:   app.metrics.TracerProvider(),
-	})
-	if err != nil {
-		return errors.Wrap(err, "create LogQL engine")
+	// The ClickHouse optimizer pushes filtering into chstorage's InputNode; it is a no-op for
+	// other backends, so only enable it when logs are actually served from ClickHouse. When logs
+	// are served from the embedded storage engine, the storage optimizer offloads line filters into
+	// the fetch instead.
+	var optimizer logqlengine.Optimizer = &chstorage.ClickhouseOptimizer{}
+	if app.cfg.LogsBackend == MetricsBackendStorage {
+		optimizer = &storagebackend.LogQLOptimizer{}
 	}
-	loki := lokihandler.NewLokiAPI(q, engine)
 
-	s, err := lokiapi.NewServer(loki,
-		lokiapi.WithTracerProvider(app.metrics.TracerProvider()),
-		lokiapi.WithMeterProvider(app.metrics.MeterProvider()),
-		lokiapi.WithErrorHandler(func(ctx context.Context, w http.ResponseWriter, r *http.Request, err error) {
-			code := ogenerrors.ErrorCode(err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(code)
-
-			e := jx.GetEncoder()
-			defer jx.PutEncoder(e)
-
-			if err != nil {
-				e.Str(err.Error())
-			} else {
-				e.Str("<nil>")
-			}
-
-			_, _ = w.Write(e.Bytes())
-		}),
-	)
+	s, err := queryapi.NewLoki(queryapi.LokiOptions{
+		Config:         cfg,
+		Querier:        q,
+		Optimizers:     []logqlengine.Optimizer{optimizer},
+		TracerProvider: app.telemetry.TracerProvider(),
+		MeterProvider:  app.telemetry.MeterProvider(),
+	})
 	if err != nil {
 		return err
 	}
 
-	addOgen[lokiapi.Route](app, "loki", s, cfg.Bind)
+	addOgen(app, "loki", s, cfg.Bind, cfg.Auth)
 	return nil
 }
 
@@ -241,43 +321,57 @@ func (app *App) trySetupProm() error {
 		return nil
 	}
 	cfg := app.cfg.Prometheus
-	cfg.setDefaults()
+	cfg.SetDefaults()
 
-	engine := promql.NewEngine(promql.EngineOpts{
-		// NOTE: zero-value MaxSamples and Timeout makes
-		// all queries to fail with error.
-		MaxSamples:           cfg.MaxSamples,
-		Timeout:              cfg.Timeout,
-		LookbackDelta:        cfg.LookbackDelta,
-		EnableAtModifier:     cfg.EnableAtModifier,
-		EnableNegativeOffset: *cfg.EnableNegativeOffset,
-		EnablePerStepStats:   cfg.EnablePerStepStats,
+	s, err := queryapi.NewPrometheus(queryapi.PrometheusOptions{
+		Config:         cfg,
+		Querier:        q,
+		Logger:         app.lg,
+		TracerProvider: app.telemetry.TracerProvider(),
+		MeterProvider:  app.telemetry.MeterProvider(),
 	})
-	prom := promhandler.NewPromAPI(engine, q, q, promhandler.PromAPIOptions{})
-
-	s, err := promapi.NewServer(prom,
-		promapi.WithTracerProvider(app.metrics.TracerProvider()),
-		promapi.WithMeterProvider(app.metrics.MeterProvider()),
-		promapi.WithMiddleware(promhandler.TimeoutMiddleware()),
-	)
 	if err != nil {
 		return err
 	}
 
-	addOgen[promapi.Route](app, "prom", s, cfg.Bind)
+	addOgen(app, "prom", s, cfg.Bind, cfg.Auth, promhandler.PatchForm)
 	return nil
 }
 
-func (app *App) setupHealthCheck() {
+// newScarecrowEngine builds the internal/scarecrow engine for [App.trySetupProm].
+func (app *App) newScarecrowEngine(q metricQuerier, cfg PrometheusConfig) *scarecrow.Engine {
+	var tracerProvider trace.TracerProvider
+	// Telemetry is absent in tests that build an App directly; scarecrow falls back to the global
+	// provider when this is unset.
+	if app.telemetry != nil {
+		tracerProvider = app.telemetry.TracerProvider()
+	}
+
+	return queryapi.NewScarecrowEngine(app.lg, q, cfg, tracerProvider)
+}
+
+func (app *App) setupHealthCheck() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/readiness", app.handleReadinessProbe)
 	mux.HandleFunc("/liveness", app.handleLivenessProbe)
 	mux.HandleFunc("/startup", app.handleStartupProbe)
+	var handler http.Handler = mux
+
 	cfg := app.cfg.HealthCheck
-	cfg.setDefaults()
+	cfg.SetDefaults()
+
+	auth, err := config.AuthMiddleware(cfg.Auth)
+	if err != nil {
+		return errors.Wrap(err, "create auth middlewares")
+	}
+	if auth != nil {
+		app.lg.Info("Enabling healthcheck authentication middleware", zap.Int("configs", len(cfg.Auth)))
+		handler = httpmiddleware.Wrap(handler, auth)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Bind,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: time.Second,
 	}
 	app.services["healthcheck"] = func(ctx context.Context) error {
@@ -296,6 +390,7 @@ func (app *App) setupHealthCheck() {
 		}
 		return nil
 	}
+	return nil
 }
 
 func (app *App) handleReadinessProbe(w http.ResponseWriter, _ *http.Request) {
@@ -311,8 +406,42 @@ func (app *App) handleStartupProbe(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (app *App) setupCollector() error {
+	var telemetry otelreceiver.TelemetrySettings
+	{
+		sig := app.cfg.CollectorSignals
+		if sig["logs"] {
+			telemetry.Logger = app.lg
+			telemetry.LoggerProvider = app.telemetry.LoggerProvider()
+		}
+		if sig["metrics"] {
+			telemetry.MeterProvider = app.telemetry.MeterProvider()
+		}
+		if sig["trace"] {
+			telemetry.TracerProvider = app.telemetry.TracerProvider()
+		}
+	}
+
+	var factoryOpts []otelreceiver.Option
+	if app.metricsSink != nil {
+		factoryOpts = append(factoryOpts, otelreceiver.WithMetricsSink(app.metricsSink))
+	}
+	if app.tracesSink != nil {
+		factoryOpts = append(factoryOpts, otelreceiver.WithTracesSink(app.tracesSink))
+	}
+	if app.logsSink != nil {
+		factoryOpts = append(factoryOpts, otelreceiver.WithLogsSink(app.logsSink))
+	}
+	if app.profilesSink != nil {
+		factoryOpts = append(factoryOpts, otelreceiver.WithProfilesSink(app.profilesSink))
+		// The collector gates its experimental profiles pipeline behind a feature gate; enable it
+		// so the profiles signal (served from the embedded storage engine) can be ingested.
+		if err := featuregate.GlobalRegistry().Set("service.profilesSupport", true); err != nil {
+			return errors.Wrap(err, "enable profiles support feature gate")
+		}
+	}
+
 	col, err := otelcol.NewCollector(otelcol.CollectorSettings{
-		Factories: otelreceiver.Factories,
+		Factories: otelreceiver.Factories(telemetry, factoryOpts...),
 		BuildInfo: component.NewDefaultBuildInfo(),
 		LoggingOptions: []zap.Option{
 			zap.WrapCore(func(zapcore.Core) zapcore.Core {
@@ -361,8 +490,13 @@ func (app *App) Run(ctx context.Context) error {
 	}
 
 	for k, s := range app.services {
-		s := s
 		g.Go(func() (rerr error) {
+			defer func() {
+				if r := recover(); r != nil {
+					rerr = errors.New("panic recovered")
+					zctx.From(ctx).Error("panic", zap.Any("panic", r))
+				}
+			}()
 			defer func() {
 				zctx.From(ctx).Debug("Service shut down",
 					zap.Error(rerr),

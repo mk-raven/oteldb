@@ -8,10 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/tempoapi"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/tempoapi"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestEngine(t *testing.T) {
@@ -210,6 +213,41 @@ func TestEngine(t *testing.T) {
 			false,
 		},
 
+		// A trace with no parentless span (its root was never ingested, or starts outside the
+		// window) has no root name and no root service, exactly as Tempo reports it.
+		{
+			`{ rootName = "Span #1" }`,
+			[]spanIDs{
+				{id: 2, parent: 1},
+				{id: 3, parent: 2},
+			},
+			nil,
+			nil,
+			false,
+		},
+		{
+			`{ rootServiceName = "test.service" }`,
+			[]spanIDs{
+				{id: 2, parent: 1},
+				{id: 3, parent: 2},
+			},
+			nil,
+			nil,
+			false,
+		},
+		{
+			`{ rootName = "" && rootServiceName = "" }`,
+			[]spanIDs{
+				{id: 2, parent: 1},
+				{id: 3, parent: 2},
+			},
+			nil,
+			[]uint64{
+				2, 3,
+			},
+			false,
+		},
+
 		// Invalid query
 		{
 			`{ .a = }`,
@@ -220,7 +258,6 @@ func TestEngine(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			q := MemoryQuerier{}
 			for _, span := range generateSpans(tt.left, "left") {
@@ -325,12 +362,38 @@ func TestTimeRange(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			require.Equal(t, tt.want, tt.trange.within(
 				tt.start.AsTime(),
 				tt.end.AsTime(),
 			))
+		})
+	}
+}
+
+func TestEvalMarksSpanFailed(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{"ParseError", `{ .a = }`},
+		{"UnsupportedAttribute", `{nestedSetParent<0}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+			engine := NewEngine(&MemoryQuerier{}, Options{TracerProvider: tp})
+
+			_, err := engine.Eval(context.Background(), tt.query, EvalParams{Limit: 100})
+			require.Error(t, err)
+
+			spans := rec.Ended()
+			require.Len(t, spans, 1)
+			// A span that only records the exception event keeps an unset status, so an error-filtered
+			// trace view hides the one span that carries the cause.
+			require.Equal(t, codes.Error, spans[0].Status().Code)
+			require.Equal(t, err.Error(), spans[0].Status().Description)
 		})
 	}
 }

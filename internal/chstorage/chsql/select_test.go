@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/ch-go/proto"
 	"github.com/go-faster/sdk/gold"
 	"github.com/stretchr/testify/require"
 )
@@ -39,6 +40,7 @@ func TestSelect(t *testing.T) {
 						InTimeRange(
 							"timestamp",
 							start, end,
+							proto.PrecisionNano,
 						),
 						Or(
 							Eq(
@@ -82,7 +84,7 @@ func TestSelect(t *testing.T) {
 			},
 			false,
 		},
-		// Test ORDER By.
+		// Test ORDER BY.
 		{
 			func() *SelectQuery {
 				return Select("spans",
@@ -105,6 +107,13 @@ func TestSelect(t *testing.T) {
 					Ident("duration"),
 					Desc,
 				)
+			},
+			false,
+		},
+		// Ensure builder properly handles zero value result expression.
+		{
+			func() *SelectQuery {
+				return Select("spans", ResultColumn{Name: "name"})
 			},
 			false,
 		},
@@ -148,7 +157,6 @@ func TestSelect(t *testing.T) {
 			},
 			false,
 		},
-
 		// Test PREWHERE.
 		{
 			func() *SelectQuery {
@@ -162,6 +170,33 @@ func TestSelect(t *testing.T) {
 			},
 			false,
 		},
+		// Test GROUP BY/HAVING.
+		{
+			func() *SelectQuery {
+				return Select(
+					"logs",
+					Column("body", nil),
+				).
+					GroupBy(Ident("body"), Ident("timestamp")).
+					Having(
+						HasToken(Ident("body"), "Error"),
+						HasToken(Ident("level"), "Error"),
+					)
+			},
+			false,
+		},
+		// Test JOINs and table aliases.
+		{
+			func() *SelectQuery {
+				return Select(
+					"logs",
+					Column("body", nil),
+				).Alias("t1").
+					InnerJoin("logs_inner_join", "", Value(true)).
+					InnerJoin("logs_inner_join_alias", "t3", Value(true))
+			},
+			false,
+		},
 
 		// No columns.
 		{
@@ -170,7 +205,6 @@ func TestSelect(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		name := fmt.Sprintf("Test%d", i+1)
 		t.Run(name, func(t *testing.T) {
 			q := tt.build()

@@ -12,7 +12,7 @@ type Token struct {
 // TokenType defines TraceQL token type.
 type TokenType int
 
-//go:generate go run golang.org/x/tools/cmd/stringer -type=TokenType
+//go:generate go tool stringer -type=TokenType
 
 const (
 	Invalid TokenType = iota
@@ -79,6 +79,59 @@ const (
 	By
 	Coalesce
 	Select
+
+	// Scoped intrinsic colon prefixes.
+	TraceColon
+	SpanColon
+	EventColon
+	LinkColon
+	InstrumentationColon
+
+	// New intrinsic keywords.
+	StatusMessage   // statusMessage
+	RootService     // rootService
+	NestedSetLeft   // nestedSetLeft
+	NestedSetRight  // nestedSetRight
+	NestedSetParent // nestedSetParent
+	ID              // id
+	TraceID         // traceID
+	SpanID          // spanID
+	ParentID        // parentID
+	TimeSinceStart  // timeSinceStart
+	Version         // version
+
+	// Structural spanset operators.
+	//
+	// NOTE: child is [Gt], parent is [Lt], descendant is [Desc],
+	// sibling is [Tilde] and not-sibling is [NotRe].
+	Ance         // <<
+	NotChild     // !>
+	NotParent    // !<
+	NotDesc      // !>>
+	NotAnce      // !<<
+	UnionChild   // &>
+	UnionParent  // &<
+	UnionDesc    // &>>
+	UnionAnce    // &<<
+	UnionSibling // &~
+
+	// Metrics aggregations.
+	Rate              // rate
+	CountOverTime     // count_over_time
+	MinOverTime       // min_over_time
+	MaxOverTime       // max_over_time
+	SumOverTime       // sum_over_time
+	AvgOverTime       // avg_over_time
+	QuantileOverTime  // quantile_over_time
+	HistogramOverTime // histogram_over_time
+
+	// Metrics second stage functions.
+	TopK    // topk
+	BottomK // bottomk
+
+	// NOTE: keep this block append-only, the generated stringer indexes
+	// constants by position.
+	Compare // compare
 )
 
 var tokens = map[string]TokenType{
@@ -120,6 +173,16 @@ var tokens = map[string]TokenType{
 	"|":               Pipe,
 	">>":              Desc,
 	"~":               Tilde,
+	"<<":              Ance,
+	"!>":              NotChild,
+	"!<":              NotParent,
+	"!>>":             NotDesc,
+	"!<<":             NotAnce,
+	"&>":              UnionChild,
+	"&<":              UnionParent,
+	"&>>":             UnionDesc,
+	"&<<":             UnionAnce,
+	"&~":              UnionSibling,
 	"duration":        SpanDuration,
 	"childCount":      ChildCount,
 	"name":            Name,
@@ -137,4 +200,29 @@ var tokens = map[string]TokenType{
 	"by":              By,
 	"coalesce":        Coalesce,
 	"select":          Select,
+	"statusMessage":   StatusMessage,
+	"rootService":     RootService,
+	"nestedSetLeft":   NestedSetLeft,
+	"nestedSetRight":  NestedSetRight,
+	"nestedSetParent": NestedSetParent,
+	"id":              ID,
+	"traceID":         TraceID,
+	"spanID":          SpanID,
+	"parentID":        ParentID,
+	"timeSinceStart":  TimeSinceStart,
+	"version":         Version,
+
+	"rate":                Rate,
+	"count_over_time":     CountOverTime,
+	"min_over_time":       MinOverTime,
+	"max_over_time":       MaxOverTime,
+	"sum_over_time":       SumOverTime,
+	"avg_over_time":       AvgOverTime,
+	"quantile_over_time":  QuantileOverTime,
+	"histogram_over_time": HistogramOverTime,
+
+	"compare": Compare,
+
+	"topk":    TopK,
+	"bottomk": BottomK,
 }

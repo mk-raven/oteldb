@@ -5,9 +5,10 @@ import (
 	"strings"
 
 	"github.com/go-faster/jx"
+	"github.com/zeebo/xxh3"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/otelstorage"
 )
 
 type lazyAttributes struct {
@@ -144,18 +145,20 @@ func decodeValue(d *jx.Decoder, val pcommon.Value) error {
 			return err
 		}
 		if n.IsInt() {
-			v, err := n.Int64()
-			if err != nil {
-				return err
+			if v, err := n.Int64(); err == nil {
+				val.SetInt(v)
+				return nil
 			}
-			val.SetInt(v)
-		} else {
-			v, err := n.Float64()
-			if err != nil {
-				return err
-			}
-			val.SetDouble(v)
+			// An integer outside the int64 range (e.g. a uint64 id/hash) does not fit pcommon's int
+			// value. Preserve it exactly as a string rather than failing the whole block decode.
+			val.SetStr(n.String())
+			return nil
 		}
+		v, err := n.Float64()
+		if err != nil {
+			return err
+		}
+		val.SetDouble(v)
 		return nil
 	case jx.Null:
 		if err := d.Null(); err != nil {
@@ -189,4 +192,16 @@ func decodeMap(d *jx.Decoder, m pcommon.Map) error {
 		rval := m.PutEmpty(key)
 		return decodeValue(d, rval)
 	})
+}
+
+func hashTimeseries(name string, res, scope, attrs otelstorage.Attrs) [16]byte {
+	h := xxh3.New()
+
+	_, _ = h.WriteString(name)
+	otelstorage.WriteAttrHash(h, res.AsMap())
+	otelstorage.WriteAttrHash(h, scope.AsMap())
+	otelstorage.WriteAttrHash(h, attrs.AsMap())
+
+	hash := h.Sum128().Bytes()
+	return hash
 }

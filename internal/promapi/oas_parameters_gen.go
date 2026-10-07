@@ -19,13 +19,13 @@ type GetLabelValuesParams struct {
 	// Label to query values.
 	Label string
 	// Start timestamp.
-	Start OptPrometheusTimestamp
+	Start OptPrometheusTimestamp `json:",omitempty,omitzero"`
 	// End timestamp.
-	End OptPrometheusTimestamp
+	End OptPrometheusTimestamp `json:",omitempty,omitzero"`
 	// Repeated series selector argument that selects the series from which to read the label names.
-	Match []string
+	Match []string `json:",omitempty"`
 	// Maximum number of returned series. Optional. 0 means disabled.
-	Limit OptInt
+	Limit OptInt `json:",omitempty,omitzero"`
 }
 
 func unpackGetLabelValuesParams(packed middleware.Parameters) (params GetLabelValuesParams) {
@@ -228,6 +228,7 @@ func decodeGetLabelValuesParams(args [1]string, argsEscaped bool, r *http.Reques
 
 		if err := q.HasParam(cfg); err == nil {
 			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				params.Match = nil
 				return d.DecodeArray(func(d uri.Decoder) error {
 					var paramsDotMatchVal string
 					if err := func() error {
@@ -308,13 +309,13 @@ func decodeGetLabelValuesParams(args [1]string, argsEscaped bool, r *http.Reques
 // GetLabelsParams is parameters of getLabels operation.
 type GetLabelsParams struct {
 	// Start timestamp.
-	Start OptPrometheusTimestamp
+	Start OptPrometheusTimestamp `json:",omitempty,omitzero"`
 	// End timestamp.
-	End OptPrometheusTimestamp
+	End OptPrometheusTimestamp `json:",omitempty,omitzero"`
 	// Repeated series selector argument that selects the series from which to read the label names.
-	Match []string
+	Match []string `json:",omitempty"`
 	// Maximum number of returned series. Optional. 0 means disabled.
-	Limit OptInt
+	Limit OptInt `json:",omitempty,omitzero"`
 }
 
 func unpackGetLabelsParams(packed middleware.Parameters) (params GetLabelsParams) {
@@ -465,6 +466,7 @@ func decodeGetLabelsParams(args [0]string, argsEscaped bool, r *http.Request) (p
 
 		if err := q.HasParam(cfg); err == nil {
 			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				params.Match = nil
 				return d.DecodeArray(func(d uri.Decoder) error {
 					var paramsDotMatchVal string
 					if err := func() error {
@@ -545,12 +547,11 @@ func decodeGetLabelsParams(args [0]string, argsEscaped bool, r *http.Request) (p
 // GetMetadataParams is parameters of getMetadata operation.
 type GetMetadataParams struct {
 	// Maximum number of metrics to return.
-	Limit OptInt
+	Limit OptInt `json:",omitempty,omitzero"`
 	// FIXME(tdakkota): undocumented.
-	LimitPerMetric OptInt
-	// A metric name to filter metadata for.
-	// All metric metadata is retrieved if left empty.
-	Metric OptString
+	LimitPerMetric OptInt `json:",omitempty,omitzero"`
+	// A metric name to filter metadata for. All metric metadata is retrieved if left empty.
+	Metric OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetMetadataParams(packed middleware.Parameters) (params GetMetadataParams) {
@@ -717,11 +718,11 @@ type GetQueryParams struct {
 	// Prometheus expression query string.
 	Query string
 	// Evaluation timestamp.
-	Time OptPrometheusTimestamp
+	Time OptPrometheusTimestamp `json:",omitempty,omitzero"`
 	// Lookback delta duration in duration format or float number of seconds.
-	LookbackDelta OptString
+	LookbackDelta OptString `json:",omitempty,omitzero"`
 	// Statistics to return.
-	Stats OptString
+	Stats OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetQueryParams(packed middleware.Parameters) (params GetQueryParams) {
@@ -1103,12 +1104,13 @@ type GetQueryRangeParams struct {
 	Start PrometheusTimestamp
 	// End timestamp, inclusive.
 	End PrometheusTimestamp
-	// Query resolution step width in duration format or float number of seconds.
-	Step string
+	// Query resolution step width in duration format or float number of seconds. Official Prometheus spec
+	// requires it, but some clients do not send it (e.g vmalert).
+	Step OptString `json:",omitempty,omitzero"`
 	// Lookback delta duration in duration format or float number of seconds.
-	LookbackDelta OptString
+	LookbackDelta OptString `json:",omitempty,omitzero"`
 	// Statistics to return.
-	Stats OptString
+	Stats OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetQueryRangeParams(packed middleware.Parameters) (params GetQueryRangeParams) {
@@ -1138,7 +1140,9 @@ func unpackGetQueryRangeParams(packed middleware.Parameters) (params GetQueryRan
 			Name: "step",
 			In:   "query",
 		}
-		params.Step = packed[key].(string)
+		if v, ok := packed[key]; ok {
+			params.Step = v.(OptString)
+		}
 	}
 	{
 		key := middleware.ParameterKey{
@@ -1295,23 +1299,28 @@ func decodeGetQueryRangeParams(args [0]string, argsEscaped bool, r *http.Request
 
 		if err := q.HasParam(cfg); err == nil {
 			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				val, err := d.DecodeValue()
-				if err != nil {
+				var paramsDotStepVal string
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotStepVal = c
+					return nil
+				}(); err != nil {
 					return err
 				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.Step = c
+				params.Step.SetTo(paramsDotStepVal)
 				return nil
 			}); err != nil {
 				return err
 			}
-		} else {
-			return err
 		}
 		return nil
 	}(); err != nil {
@@ -1408,22 +1417,20 @@ func decodeGetQueryRangeParams(args [0]string, argsEscaped bool, r *http.Request
 
 // GetRulesParams is parameters of getRules operation.
 type GetRulesParams struct {
-	// Return only the alerting rules (e.g. type=alert) or the recording rules (e.g. type=record).
-	// When the parameter is absent or empty, no filtering is done.
-	Type OptGetRulesType
-	// Only return rules with the given rule name.
-	// If the parameter is repeated, rules with any of the provided names are returned.
-	// If we've filtered out all the rules of a group, the group is not returned.
-	// When the parameter is absent or empty, no filtering is done.
-	RuleName []string
-	// Only return rules with the given rule group name.
-	// If the parameter is repeated, rules with any of the provided rule group names are returned.
-	// When the parameter is absent or empty, no filtering is done.
-	RuleGroup []string
-	// Only return rules with the given filepath.
-	// If the parameter is repeated, rules with any of the provided filepaths are returned.
-	// When the parameter is absent or empty, no filtering is done.
-	File []string
+	// Return only the alerting rules (e.g. type=alert) or the recording rules (e.g. type=record). When the
+	// parameter is absent or empty, no filtering is done.
+	Type OptGetRulesType `json:",omitempty,omitzero"`
+	// Only return rules with the given rule name. If the parameter is repeated, rules with any of the
+	// provided names are returned. If we've filtered out all the rules of a group, the group is not
+	// returned. When the parameter is absent or empty, no filtering is done.
+	RuleName []string `json:",omitempty"`
+	// Only return rules with the given rule group name. If the parameter is repeated, rules with any of
+	// the provided rule group names are returned. When the parameter is absent or empty, no filtering is
+	// done.
+	RuleGroup []string `json:",omitempty"`
+	// Only return rules with the given filepath. If the parameter is repeated, rules with any of the
+	// provided filepaths are returned. When the parameter is absent or empty, no filtering is done.
+	File []string `json:",omitempty"`
 }
 
 func unpackGetRulesParams(packed middleware.Parameters) (params GetRulesParams) {
@@ -1534,6 +1541,7 @@ func decodeGetRulesParams(args [0]string, argsEscaped bool, r *http.Request) (pa
 
 		if err := q.HasParam(cfg); err == nil {
 			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				params.RuleName = nil
 				return d.DecodeArray(func(d uri.Decoder) error {
 					var paramsDotRuleNameVal string
 					if err := func() error {
@@ -1577,6 +1585,7 @@ func decodeGetRulesParams(args [0]string, argsEscaped bool, r *http.Request) (pa
 
 		if err := q.HasParam(cfg); err == nil {
 			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				params.RuleGroup = nil
 				return d.DecodeArray(func(d uri.Decoder) error {
 					var paramsDotRuleGroupVal string
 					if err := func() error {
@@ -1620,6 +1629,7 @@ func decodeGetRulesParams(args [0]string, argsEscaped bool, r *http.Request) (pa
 
 		if err := q.HasParam(cfg); err == nil {
 			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				params.File = nil
 				return d.DecodeArray(func(d uri.Decoder) error {
 					var paramsDotFileVal string
 					if err := func() error {
@@ -1659,13 +1669,13 @@ func decodeGetRulesParams(args [0]string, argsEscaped bool, r *http.Request) (pa
 // GetSeriesParams is parameters of getSeries operation.
 type GetSeriesParams struct {
 	// Start timestamp.
-	Start OptPrometheusTimestamp
+	Start OptPrometheusTimestamp `json:",omitempty,omitzero"`
 	// End timestamp.
-	End OptPrometheusTimestamp
+	End OptPrometheusTimestamp `json:",omitempty,omitzero"`
 	// Repeated series selector argument that selects the series from which to read the label names.
-	Match []string
+	Match []string `json:",omitempty"`
 	// Maximum number of returned series. Optional. 0 means disabled.
-	Limit OptInt
+	Limit OptInt `json:",omitempty,omitzero"`
 }
 
 func unpackGetSeriesParams(packed middleware.Parameters) (params GetSeriesParams) {
@@ -1814,6 +1824,7 @@ func decodeGetSeriesParams(args [0]string, argsEscaped bool, r *http.Request) (p
 
 		if err := q.HasParam(cfg); err == nil {
 			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				params.Match = nil
 				return d.DecodeArray(func(d uri.Decoder) error {
 					var paramsDotMatchVal string
 					if err := func() error {

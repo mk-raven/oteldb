@@ -1,17 +1,11 @@
 package chstorage
 
 import (
-	"context"
-	"crypto/sha256"
-	"fmt"
-	"time"
+	"iter"
 
-	"github.com/ClickHouse/ch-go"
 	"github.com/go-faster/errors"
-	"github.com/go-faster/sdk/zctx"
-	"go.uber.org/zap"
 
-	"github.com/go-faster/oteldb/internal/ddl"
+	"github.com/oteldb/oteldb/internal/ddl"
 )
 
 // Tables define table names.
@@ -20,6 +14,7 @@ type Tables struct {
 	Tags  string
 
 	Points        string
+	Timeseries    string
 	ExpHistograms string
 	Exemplars     string
 	Labels        string
@@ -28,9 +23,25 @@ type Tables struct {
 	LogAttrs string
 
 	Migration string
+}
 
-	TTL     time.Duration
-	Cluster string
+// DefaultTables returns default tables.
+func DefaultTables() Tables {
+	return Tables{
+		Spans: "traces_spans",
+		Tags:  "traces_tags",
+
+		Points:        "metrics_points",
+		Timeseries:    "metrics_timeseries",
+		ExpHistograms: "metrics_exp_histograms",
+		Exemplars:     "metrics_exemplars",
+		Labels:        "metrics_labels",
+
+		Logs:     "logs",
+		LogAttrs: "logs_attrs",
+
+		Migration: "migration",
+	}
 }
 
 // Validate checks table names
@@ -45,170 +56,54 @@ func (t *Tables) Validate() error {
 
 // Each calls given callback for each table.
 func (t *Tables) Each(cb func(name *string) error) error {
-	for _, table := range []struct {
-		field     *string
-		fieldName string
-	}{
-		{&t.Spans, "Spans"},
-		{&t.Tags, "Tags"},
-
-		{&t.Points, "Points"},
-		{&t.ExpHistograms, "ExpHistograms"},
-		{&t.Exemplars, "Exemplars"},
-		{&t.Labels, "Labels"},
-
-		{&t.Logs, "Logs"},
-		{&t.LogAttrs, "LogAttrs"},
-
-		{&t.Migration, "Migration"},
-	} {
-		if err := cb(table.field); err != nil {
-			return errors.Wrapf(err, "table %s", table.fieldName)
+	for table := range t.each() {
+		if err := cb(table.Name); err != nil {
+			return errors.Wrapf(err, "table %q", *table.Name)
 		}
 	}
 	return nil
 }
 
-// DefaultTables returns default tables.
-func DefaultTables() Tables {
-	return Tables{
-		Spans: "traces_spans",
-		Tags:  "traces_tags",
+func (t *Tables) each() iter.Seq[oteldbTable] {
+	return func(yield func(oteldbTable) bool) {
+		for _, table := range []struct {
+			field     *string
+			fieldName string
+			data      bool
+			ddl       ddl.Table
+		}{
+			{&t.Spans, "Spans", true, newSpanColumns().DDL()},
+			{&t.Tags, "Tags", true, newTracesTagsDDL()},
 
-		Points:        "metrics_points",
-		ExpHistograms: "metrics_exp_histograms",
-		Exemplars:     "metrics_exemplars",
-		Labels:        "metrics_labels",
+			{&t.Points, "Points", true, newPointColumns().DDL()},
+			{&t.Timeseries, "Timeseries", true, newTimeseriesColumns().DDL()},
+			{&t.ExpHistograms, "ExpHistograms", true, newExpHistogramColumns().DDL()},
+			{&t.Exemplars, "Exemplars", true, newExemplarColumns().DDL()},
+			{&t.Labels, "Labels", true, newLabelsColumns().DDL()},
 
-		Logs:     "logs",
-		LogAttrs: "logs_attrs",
+			{&t.Logs, "Logs", true, newLogColumns().DDL()},
+			{&t.LogAttrs, "LogAttrs", true, newLogAttrMapColumns().DDL()},
 
-		Migration: "migration",
-	}
-}
-
-func (t Tables) getHashes(ctx context.Context, c ClickhouseClient) (map[string]string, error) {
-	col := newMigrationColumns()
-	if err := c.Do(ctx, ch.Query{
-		Logger: zctx.From(ctx).Named("ch"),
-		Body:   fmt.Sprintf("SELECT table, ddl FROM %s FINAL", t.Migration),
-		Result: col.Result(),
-	}); err != nil {
-		return nil, errors.Wrap(err, "query")
-	}
-	return col.Mapping(), nil
-}
-
-func (t Tables) saveHashes(ctx context.Context, c ClickhouseClient, m map[string]string) error {
-	col := newMigrationColumns()
-	col.Save(m)
-	if err := c.Do(ctx, ch.Query{
-		Logger: zctx.From(ctx).Named("ch"),
-		Input:  col.Input(),
-		Body:   col.Input().Into(t.Migration),
-	}); err != nil {
-		return errors.Wrap(err, "query")
-	}
-	return nil
-}
-
-type generateOptions struct {
-	Name string
-	DDL  ddl.Table
-}
-
-func (t Tables) generateQuery(opts generateOptions) (string, error) {
-	d := opts.DDL
-	d.Name = opts.Name
-	if t.Cluster != "" {
-		d.Cluster = t.Cluster
-	}
-	if t.TTL > 0 && d.TTL.Field != "" {
-		d.TTL.Delta = t.TTL
-	}
-	s, err := ddl.Generate(d)
-	if err != nil {
-		return "", errors.Wrap(err, "generate")
-	}
-	return s, nil
-}
-
-// Create creates tables.
-func (t Tables) Create(ctx context.Context, c ClickhouseClient) error {
-	if err := t.Validate(); err != nil {
-		return errors.Wrap(err, "validate")
-	}
-	{
-		q, err := t.generateQuery(generateOptions{
-			Name: t.Migration,
-			DDL: ddl.Table{
-				Engine:  "ReplacingMergeTree(ts)",
-				OrderBy: []string{"table"},
-				Columns: []ddl.Column{
-					{Name: "table", Type: "String"},
-					{Name: "ddl", Type: "String"},
-					{Name: "ts", Type: "DateTime", Default: "now()"},
-				},
-			},
-		})
-		if err != nil {
-			return errors.Wrap(err, "generate migration table ddl")
-		}
-		if err := c.Do(ctx, ch.Query{
-			Logger: zctx.From(ctx).Named("ch"),
-			Body:   q,
-		}); err != nil {
-			return errors.Wrapf(err, "create %q", t.Migration)
-		}
-	}
-
-	hashes, err := t.getHashes(ctx, c)
-	if err != nil {
-		return errors.Wrap(err, "get hashes")
-	}
-
-	for _, s := range []generateOptions{
-		{Name: t.Spans, DDL: newSpanColumns().DDL()},
-		{Name: t.Tags, DDL: newTracesTagsDDL()},
-		{Name: t.Points, DDL: newPointColumns().DDL()},
-		{Name: t.ExpHistograms, DDL: newExpHistogramColumns().DDL()},
-		{Name: t.Exemplars, DDL: newExemplarColumns().DDL()},
-		{Name: t.Labels, DDL: newLabelsColumns().DDL()},
-		{Name: t.Logs, DDL: newLogColumns().DDL()},
-		{Name: t.LogAttrs, DDL: newLogAttrMapColumns().DDL()},
-	} {
-		query, err := t.generateQuery(s)
-		if err != nil {
-			return errors.Wrapf(err, "generate %q", s.Name)
-		}
-		name := s.Name
-		target := fmt.Sprintf("%x", sha256.Sum256([]byte(query)))
-		if current, ok := hashes[s.Name]; ok && current != target {
-			// HACK: this will DROP all data in the table
-			// TODO: implement ALTER TABLE
-			zctx.From(ctx).Warn("DROPPING TABLE (schema changed!)",
-				zap.String("table", name),
-				zap.String("current", current),
-				zap.String("target", target),
-			)
-			if err := c.Do(ctx, ch.Query{
-				Logger: zctx.From(ctx).Named("ch"),
-				Body:   fmt.Sprintf("DROP TABLE IF EXISTS %s", name),
-			}); err != nil {
-				return errors.Wrapf(err, "drop %q", name)
+			{&t.Migration, "Migration", false, t.migrationDDL()},
+		} {
+			t := oteldbTable{
+				Name:   table.field,
+				DDL:    table.ddl,
+				IsData: table.data,
+			}
+			if !yield(t) {
+				return
 			}
 		}
-		hashes[name] = target
-		if err := c.Do(ctx, ch.Query{
-			Logger: zctx.From(ctx).Named("ch"),
-			Body:   query,
-		}); err != nil {
-			return errors.Wrapf(err, "create %q", name)
-		}
 	}
-	if err := t.saveHashes(ctx, c, hashes); err != nil {
-		return errors.Wrap(err, "save hashes")
-	}
+}
 
-	return nil
+type oteldbTable struct {
+	Name   *string
+	DDL    ddl.Table
+	IsData bool
+}
+
+func (t *Tables) migrationDDL() ddl.Table {
+	return newMigrationColumns().DDL()
 }

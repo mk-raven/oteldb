@@ -21,10 +21,10 @@ import (
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/yaml"
 
-	"github.com/go-faster/oteldb/cmd/otelbench/chtracker"
-	"github.com/go-faster/oteldb/internal/logparser"
-	"github.com/go-faster/oteldb/internal/promapi"
-	"github.com/go-faster/oteldb/internal/promproxy"
+	"github.com/oteldb/oteldb/cmd/otelbench/chtracker"
+	"github.com/oteldb/oteldb/internal/logparser"
+	"github.com/oteldb/oteldb/internal/promapi"
+	"github.com/oteldb/oteldb/internal/promproxy"
 )
 
 type promQLQuery struct {
@@ -77,7 +77,7 @@ func parseTime(s string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, errors.Wrap(err, "parse int")
 	}
-	nanos, ok := logparser.DeductNanos(v)
+	nanos, ok := logparser.DeduceNanos(v)
 	if !ok {
 		return time.Time{}, errors.Errorf("invalid unix timestamp %d", v)
 	}
@@ -126,7 +126,7 @@ func toPrometheusTimestamp(t time.Time) promapi.PrometheusTimestamp {
 func (p *PromQL) sendRangeQuery(ctx context.Context, q promproxy.RangeQuery) error {
 	res, err := p.client.GetQueryRange(ctx, promapi.GetQueryRangeParams{
 		Query: q.Query,
-		Step:  strconv.Itoa(q.Step.Value),
+		Step:  promapi.NewOptString(strconv.Itoa(q.Step.Value)),
 		Start: toPrometheusTimestamp(q.Start.Value),
 		End:   toPrometheusTimestamp(q.End.Value),
 	})
@@ -249,6 +249,17 @@ func (p *PromQL) eachFromReport(ctx context.Context, f *os.File, fn func(ctx con
 		}
 	}
 	for _, q := range report.Instant {
+		// Mirror the range/series time handling: default the evaluation time to the suite's end,
+		// and let the CLI override pin it. Without this an instant query with no explicit time is
+		// evaluated at the server's *now*; against a frozen dataset the plain instant selectors
+		// (5m lookback) silently age out and `count(<selector>)`-shaped queries return the empty
+		// vector — misread as a server correctness bug in oteldb#1126.
+		if !q.Time.Set {
+			q.Time = report.End
+		}
+		if !p.end.IsZero() {
+			q.Time = promproxy.NewOptDateTime(p.end)
+		}
 		id++
 		if err := fn(ctx, id, promproxy.NewInstantQueryQuery(q)); err != nil {
 			return errors.Wrap(err, "callback")
@@ -354,6 +365,39 @@ func (p *PromQL) runConcurrentBenchmark(ctx context.Context) error {
 	return nil
 }
 
+func (p *PromQL) waitForSeries(ctx context.Context, query promproxy.SeriesQuery) error {
+	var (
+		attempts   = 5
+		sleepDelay = 5 * time.Second
+	)
+	for {
+		res, err := p.client.GetSeries(ctx, promapi.GetSeriesParams{
+			Start: toOptPrometheusTimestamp(query.Start),
+			End:   toOptPrometheusTimestamp(query.End),
+			Match: query.Matchers,
+		})
+		if err != nil {
+			return errors.Wrap(err, "get series")
+		}
+
+		if len(res.Data) > 0 {
+			return nil
+		}
+
+		if attempts == 0 {
+			return errors.New("no series found after retries")
+		}
+		attempts--
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sleepDelay):
+			continue
+		}
+	}
+}
+
 func (p *PromQL) Run(ctx context.Context) error {
 	fmt.Println("sending promql queries from", p.Input, "to", p.Addr)
 	if !p.start.IsZero() {
@@ -366,13 +410,32 @@ func (p *PromQL) Run(ctx context.Context) error {
 		return p.runConcurrentBenchmark(ctx)
 	}
 
-	var total int
+	var (
+		total       int
+		seriesQuery *promproxy.SeriesQuery
+	)
 	if err := p.each(ctx, func(ctx context.Context, _ int, q promproxy.Query) error {
 		total += p.Count
 		total += p.Warmup
+
+		if q.Type == promproxy.SeriesQueryQuery && seriesQuery == nil {
+			sq := q.SeriesQuery
+			seriesQuery = &sq
+		}
 		return nil
 	}); err != nil {
 		return errors.Wrap(err, "count total")
+	}
+
+	if seriesQuery != nil {
+		start := time.Now()
+		fmt.Println("waiting for series to appear")
+		if err := p.waitForSeries(ctx, *seriesQuery); err != nil {
+			return errors.Wrap(err, "waiting for series to appear")
+		}
+		fmt.Println("done in", time.Since(start).Round(time.Millisecond))
+	} else {
+		fmt.Println("no series query found")
 	}
 
 	pb := progressbar.Default(int64(total))
@@ -504,6 +567,7 @@ func newPromQLBenchmarkCommand() *cobra.Command {
 	f.BoolVar(&p.AllowEmpty, "allow-empty", true, "Allow empty results")
 
 	f.StringVar(&p.TrackerOptions.TempoAddr, "tempo-addr", "http://127.0.0.1:3200", "Tempo endpoint")
+	f.StringVar(&p.TrackerOptions.OTLPEndpoint, "otlp-endpoint", "127.0.0.1:4317", "OTLP gRPC endpoint to export traces to")
 	f.BoolVar(&p.TrackerOptions.Trace, "trace", false, "Trace queries")
 
 	f.IntVar(&p.Count, "count", 1, "Number of times to run each query (only for sequential)")
@@ -511,7 +575,7 @@ func newPromQLBenchmarkCommand() *cobra.Command {
 
 	f.IntVar(&p.Jobs, "jobs", 1, "Number of concurrent jobs (only for concurrent)")
 	f.DurationVarP(&p.Duration, "duration", "d", time.Minute*5, "Duration of benchmark (only for concurrent)")
-	f.BoolVarP(&p.Concurrent, "concurrent", "c", false, "Run queries concurrently")
+	f.BoolVarP(&p.Concurrent, "concurrent", "c", false, "Load-generator mode: run random suite queries concurrently until interrupted (ignores --count/--warmup, writes no report)")
 
 	return cmd
 }

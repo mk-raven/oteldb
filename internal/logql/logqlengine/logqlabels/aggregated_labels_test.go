@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 
-	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql"
 )
 
 func TestAggregatedLabels(t *testing.T) {
@@ -57,7 +57,6 @@ func TestAggregatedLabels(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			set := NewLabelSet()
 			for k, v := range tt.set {
@@ -114,7 +113,6 @@ func TestAggregatedLabels(t *testing.T) {
 				},
 			}
 			for _, bw := range buildWays {
-				bw := bw
 				t.Run(bw.name, func(t *testing.T) {
 					labels := bw.build(set, tt.by, tt.without)
 					got := labels.AsLokiAPI()

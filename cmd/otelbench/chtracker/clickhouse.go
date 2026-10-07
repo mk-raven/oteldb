@@ -9,7 +9,7 @@ import (
 	"github.com/go-faster/errors"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
-	"github.com/go-faster/oteldb/internal/tempoapi"
+	"github.com/oteldb/oteldb/internal/tempoapi"
 )
 
 // QueryReport is a Clickhouse query stats retrieved from trace.
@@ -38,7 +38,7 @@ func (t *Tracker[Q]) retrieveReports(ctx context.Context, tq TrackedQuery[Q]) (r
 
 		res, err := t.tempo.TraceByID(reqCtx, tempoapi.TraceByIDParams{
 			TraceID: tq.TraceID,
-			Accept:  "application/protobuf",
+			Accept:  tempoapi.NewOptString("application/protobuf"),
 		})
 		if err != nil {
 			return v, errors.Wrap(err, "query Tempo API")
@@ -46,9 +46,9 @@ func (t *Tracker[Q]) retrieveReports(ctx context.Context, tq TrackedQuery[Q]) (r
 		switch r := res.(type) {
 		case *tempoapi.TraceByIDNotFound:
 			return v, errors.Errorf("trace %q not found", tq.TraceID)
-		case *tempoapi.TraceByID:
+		case *tempoapi.TraceByIDHeaders:
 			var um ptrace.ProtoUnmarshaler
-			buf, err := io.ReadAll(r.Data)
+			buf, err := io.ReadAll(r.Response.Data)
 			if err != nil {
 				return v, backoff.Permanent(errors.Wrap(err, "read data"))
 			}

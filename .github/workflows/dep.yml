@@ -15,9 +15,9 @@ jobs:
       FIRST_COMMIT_SHA: bca36d71977c623525a48c631309fcedb26605a9
     steps:
       - name: 'Checkout Repository'
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: 'Dependency Review'
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
           head-ref: HEAD
           base-ref: "${{ env.FIRST_COMMIT_SHA }}"

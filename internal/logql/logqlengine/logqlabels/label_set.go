@@ -3,16 +3,16 @@ package logqlabels
 import (
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/go-faster/errors"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
-	"golang.org/x/exp/maps"
 
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/logstorage"
-	"github.com/go-faster/oteldb/internal/lokiapi"
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logstorage"
+	"github.com/oteldb/oteldb/internal/lokiapi"
+	"github.com/oteldb/oteldb/internal/otelstorage"
 )
 
 // LabelSet is a log record's label set.
@@ -37,7 +37,7 @@ func (l *LabelSet) Reset() {
 	if l.labels == nil {
 		l.labels = map[logql.Label]pcommon.Value{}
 	}
-	maps.Clear(l.labels)
+	clear(l.labels)
 }
 
 // AsLokiAPI returns lokiapi.LabelSet
@@ -91,6 +91,44 @@ func (l *LabelSet) String() string {
 	return string(l.AppendString(nil))
 }
 
+var severityStrings = func() (r map[plog.SeverityNumber]pcommon.Value) {
+	r = map[plog.SeverityNumber]pcommon.Value{}
+	for _, n := range []plog.SeverityNumber{
+		plog.SeverityNumberUnspecified,
+		plog.SeverityNumberTrace,
+		plog.SeverityNumberTrace2,
+		plog.SeverityNumberTrace3,
+		plog.SeverityNumberTrace4,
+		plog.SeverityNumberDebug,
+		plog.SeverityNumberDebug2,
+		plog.SeverityNumberDebug3,
+		plog.SeverityNumberDebug4,
+		plog.SeverityNumberInfo,
+		plog.SeverityNumberInfo2,
+		plog.SeverityNumberInfo3,
+		plog.SeverityNumberInfo4,
+		plog.SeverityNumberWarn,
+		plog.SeverityNumberWarn2,
+		plog.SeverityNumberWarn3,
+		plog.SeverityNumberWarn4,
+		plog.SeverityNumberError,
+		plog.SeverityNumberError2,
+		plog.SeverityNumberError3,
+		plog.SeverityNumberError4,
+		plog.SeverityNumberFatal,
+		plog.SeverityNumberFatal2,
+		plog.SeverityNumberFatal3,
+		plog.SeverityNumberFatal4,
+	} {
+		// Loki spells a level lower-case ("error", "warn", …), and Grafana's Logs
+		// Drilldown offers exactly those values; plog's String() is title-case
+		// ("Error"). Both backends resolve a level matcher case-insensitively, so a
+		// selector written any of the three ways still matches.
+		r[n] = pcommon.NewValueStr(strings.ToLower(n.String()))
+	}
+	return r
+}()
+
 // SetFromRecord sets labels from given log record.
 func (l *LabelSet) SetFromRecord(record logstorage.Record) {
 	l.Reset()
@@ -102,9 +140,23 @@ func (l *LabelSet) SetFromRecord(record logstorage.Record) {
 		l.Set(logstorage.LabelSpanID, pcommon.NewValueStr(spanID.Hex()))
 	}
 	if severity := record.SeverityNumber; severity != plog.SeverityNumberUnspecified {
-		l.Set(logstorage.LabelSeverity, pcommon.NewValueStr(severity.String()))
+		s := severityStrings[severity]
+		l.Set(logstorage.LabelSeverity, s)
+		l.Set(logstorage.LabelDetectedLevel, s)
+	} else if severityText := record.SeverityText; severityText != "" {
+		s := pcommon.NewValueStr(strings.ToLower(severityText))
+		l.Set(logstorage.LabelSeverity, s)
+		l.Set(logstorage.LabelDetectedLevel, s)
 	}
 	l.SetAttrs(record.Attrs, record.ScopeAttrs, record.ResourceAttrs)
+
+	// Loki synthesizes service_name="unknown_service" when service.name is absent
+	// from the OTLP resource; mirror it so the conventional selector works on the
+	// embedded engine too. A record attribute named service_name (set via SetAttrs)
+	// takes precedence.
+	if _, ok := l.Get(logstorage.LabelServiceName); !ok {
+		l.Set(logstorage.LabelServiceName, pcommon.NewValueStr(logstorage.DefaultServiceName))
+	}
 }
 
 // Len returns set length
@@ -194,4 +246,22 @@ func (l *LabelSet) SetError(typ string, err error) {
 // GetError returns error label.
 func (l *LabelSet) GetError() (string, bool) {
 	return l.GetString(logql.ErrorLabel)
+}
+
+// Level returns the level a record's severity is labeled with, exactly as [LabelSet.SetFromRecord]
+// writes it: the severity number's name when it is set, else the raw severity text, both
+// lower-cased. Empty when the record carries neither.
+//
+// It is the one place the rule lives, so a backend enumerating levels straight from its severity
+// columns offers the values its own query results are labeled with.
+func Level(number plog.SeverityNumber, text string) string {
+	if number != plog.SeverityNumberUnspecified {
+		if s, ok := severityStrings[number]; ok {
+			return s.Str()
+		}
+
+		return strings.ToLower(number.String())
+	}
+
+	return strings.ToLower(text)
 }

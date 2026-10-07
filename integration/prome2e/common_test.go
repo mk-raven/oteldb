@@ -2,29 +2,40 @@ package prome2e_test
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
 
-	"github.com/prometheus/prometheus/promql"
-	"github.com/prometheus/prometheus/storage"
+	"github.com/VictoriaMetrics/VictoriaMetrics/app/vmalert/datasource"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/exp/maps"
 
-	"github.com/go-faster/oteldb/integration/prome2e"
-	"github.com/go-faster/oteldb/integration/requirex"
-	"github.com/go-faster/oteldb/internal/promapi"
-	"github.com/go-faster/oteldb/internal/promhandler"
+	"github.com/oteldb/oteldb/integration/prome2e"
+	"github.com/oteldb/oteldb/integration/requirex"
+	"github.com/oteldb/oteldb/internal/httpmiddleware"
+	"github.com/oteldb/oteldb/internal/metricstorage"
+	"github.com/oteldb/oteldb/internal/promapi"
+	"github.com/oteldb/oteldb/internal/promhandler"
+	"github.com/oteldb/oteldb/internal/promql"
 )
 
 // MetricsConsumer is metrics consumer.
 type MetricsConsumer interface {
 	ConsumeMetrics(ctx context.Context, ld pmetric.Metrics) error
+}
+
+type MetricsConsumerFunc func(ctx context.Context, ld pmetric.Metrics) error
+
+func (f MetricsConsumerFunc) ConsumeMetrics(ctx context.Context, ld pmetric.Metrics) error {
+	return f(ctx, ld)
 }
 
 func readBatchSet(p string) (s prome2e.BatchSet, _ error) {
@@ -103,34 +114,29 @@ findLoop:
 	attrs.PutInt("code", 10)
 }
 
+type metricQuerier interface {
+	promql.Querier
+	metricstorage.MetadataQuerier
+}
+
 func setupDB(
-	ctx context.Context,
 	t *testing.T,
 	provider trace.TracerProvider,
-	set prome2e.BatchSet,
-	consumer MetricsConsumer,
-	querier storage.Queryable,
-	exemplarQuerier storage.ExemplarQueryable,
-) *promapi.Client {
-	for i, b := range set.Batches {
-		tryGenerateExemplars(b)
-		if err := consumer.ConsumeMetrics(ctx, b); err != nil {
-			t.Fatalf("Send batch %d: %+v", i, err)
-		}
-	}
-
-	engine := promql.NewEngine(promql.EngineOpts{
+	querier metricQuerier,
+) (string, *promapi.Client) {
+	engine, err := promql.New(querier, promql.EngineOpts{
 		Timeout:              time.Minute,
 		MaxSamples:           1_000_000,
 		EnableNegativeOffset: true,
 	})
-	api := promhandler.NewPromAPI(engine, querier, exemplarQuerier, promhandler.PromAPIOptions{})
+	require.NoError(t, err)
+	api := promhandler.NewPromAPI(engine, querier, querier, querier, promhandler.PromAPIOptions{})
 	promh, err := promapi.NewServer(api,
 		promapi.WithTracerProvider(provider),
 	)
 	require.NoError(t, err)
 
-	s := httptest.NewServer(promh)
+	s := httptest.NewServer(httpmiddleware.Wrap(promh, promhandler.PatchForm))
 	t.Cleanup(s.Close)
 
 	c, err := promapi.NewClient(s.URL,
@@ -138,22 +144,33 @@ func setupDB(
 		promapi.WithTracerProvider(provider),
 	)
 	require.NoError(t, err)
-	return c
+	return s.URL, c
+}
+
+func loadTestData(ctx context.Context, t *testing.T, consumer MetricsConsumer) prome2e.BatchSet {
+	set, err := readBatchSet("_testdata/metrics.json")
+	require.NoError(t, err)
+	require.NotEmpty(t, set.Batches)
+	require.NotEmpty(t, set.Labels)
+
+	for i, b := range set.Batches {
+		tryGenerateExemplars(b)
+		if err := consumer.ConsumeMetrics(ctx, b); err != nil {
+			t.Fatalf("Send batch %d: %+v", i, err)
+		}
+	}
+	return set
 }
 
 func runTest(
 	ctx context.Context,
 	t *testing.T,
 	provider trace.TracerProvider,
-	consumer MetricsConsumer,
-	querier storage.Queryable,
-	exemplarQuerier storage.ExemplarQueryable,
+	set prome2e.BatchSet,
+	querier metricQuerier,
+	oldBide bool,
 ) {
-	set, err := readBatchSet("_testdata/metrics.json")
-	require.NoError(t, err)
-	require.NotEmpty(t, set.Batches)
-	require.NotEmpty(t, set.Labels)
-	c := setupDB(ctx, t, provider, set, consumer, querier, exemplarQuerier)
+	serverURL, c := setupDB(t, provider, querier)
 
 	t.Run("Labels", func(t *testing.T) {
 		t.Run("All", func(t *testing.T) {
@@ -211,7 +228,6 @@ func runTest(
 				},
 			},
 		} {
-			tt := tt
 			t.Run(tt.name, func(t *testing.T) {
 				a := require.New(t)
 				a.NotEmpty(tt.match)
@@ -253,6 +269,7 @@ func runTest(
 				requirex.Sorted(t, got)
 			}
 		})
+		handlerLabels := maps.Keys(set.Labels["handler"])
 		for _, tt := range []struct {
 			name    string
 			params  promapi.GetLabelValuesParams
@@ -282,6 +299,20 @@ func runTest(
 				false,
 			},
 			{
+				// Grafana value-encodes every label name it puts in the path, so the handler
+				// must decode it before the store sees it. Both the path label and the
+				// matcher name are escaped here.
+				"ValueEncodedName",
+				promapi.GetLabelValuesParams{
+					Label: "U__handler",
+					Match: []string{
+						`{U__handler="/api/v1/series"}`,
+					},
+				},
+				[]string{"/api/v1/series"},
+				false,
+			},
+			{
 				"RegexMatcher",
 				promapi.GetLabelValuesParams{
 					Label: "handler",
@@ -290,6 +321,39 @@ func runTest(
 					},
 				},
 				[]string{"/api/v1/series", "/api/v1/query"},
+				false,
+			},
+			{
+				"NegativeMatcher",
+				promapi.GetLabelValuesParams{
+					Label: "handler",
+					Match: []string{
+						`prometheus_http_requests_total{handler!="/api/v1/query"}`,
+					},
+				},
+				except(handlerLabels, "/api/v1/query"),
+				false,
+			},
+			{
+				"NegativeRegexMatcher",
+				promapi.GetLabelValuesParams{
+					Label: "handler",
+					Match: []string{
+						`prometheus_http_requests_total{handler!~"^/api/v1/query$"}`,
+					},
+				},
+				except(handlerLabels, "/api/v1/query"),
+				false,
+			},
+			{
+				"NegativeEmptyMatcher",
+				promapi.GetLabelValuesParams{
+					Label: "handler",
+					Match: []string{
+						`prometheus_http_requests_total{handler!=""}`,
+					},
+				},
+				handlerLabels,
 				false,
 			},
 			{
@@ -383,7 +447,6 @@ func runTest(
 				true,
 			},
 		} {
-			tt := tt
 			t.Run(tt.name, func(t *testing.T) {
 				a := require.New(t)
 
@@ -459,6 +522,63 @@ func runTest(
 				// Check that handler!~"/api/v1/query(_range)?" is satisfied.
 				a.NotEqual("/api/v1/query", handler)
 				a.NotEqual("/api/v1/query_range", handler)
+			}
+		})
+		t.Run("NegativeMatcher", func(t *testing.T) {
+			a := require.New(t)
+
+			r, err := c.GetSeries(ctx, promapi.GetSeriesParams{
+				Start: promapi.NewOptPrometheusTimestamp(`1600000000.0`),
+				End:   promapi.NewOptPrometheusTimestamp(`1800000000.0`),
+				Match: []string{
+					`prometheus_http_requests_total{
+						handler!="/api/v1/query"
+					}`,
+				},
+			})
+			a.NoError(err)
+
+			a.NotEmpty(r.Data)
+			for _, labels := range r.Data {
+				a.NotContains([]string{"/api/v1/query"}, labels["handler"])
+			}
+		})
+		t.Run("NegativeRegexMatcher", func(t *testing.T) {
+			a := require.New(t)
+
+			r, err := c.GetSeries(ctx, promapi.GetSeriesParams{
+				Start: promapi.NewOptPrometheusTimestamp(`1600000000.0`),
+				End:   promapi.NewOptPrometheusTimestamp(`1800000000.0`),
+				Match: []string{
+					`prometheus_http_requests_total{
+						handler!~"^/api/v1/query$"
+					}`,
+				},
+			})
+			a.NoError(err)
+
+			a.NotEmpty(r.Data)
+			for _, labels := range r.Data {
+				a.NotContains([]string{"/api/v1/query"}, labels["handler"])
+			}
+		})
+		t.Run("NegativeEmptyMatcher", func(t *testing.T) {
+			a := require.New(t)
+
+			r, err := c.GetSeries(ctx, promapi.GetSeriesParams{
+				Start: promapi.NewOptPrometheusTimestamp(`1600000000.0`),
+				End:   promapi.NewOptPrometheusTimestamp(`1800000000.0`),
+				Match: []string{
+					`prometheus_http_requests_total{
+						handler!=""
+					}`,
+				},
+			})
+			a.NoError(err)
+
+			a.NotEmpty(r.Data)
+			for _, labels := range r.Data {
+				a.Contains(maps.Keys(set.Labels["handler"]), labels["handler"])
 			}
 		})
 		t.Run("MultipleMatchers", func(t *testing.T) {
@@ -567,28 +687,241 @@ func runTest(
 		}
 	})
 	t.Run("QueryRange", func(t *testing.T) {
+		t.Run("Points", func(t *testing.T) {
+			for _, tt := range []struct {
+				name  string
+				query string
+				count float64
+				empty bool
+			}{
+				{"All", `count(prometheus_http_requests_total{})`, 51, false},
+				{"GroupingAll", `sum by (__name__) (count(prometheus_http_requests_total{}))`, 51, false},
+				{"AllRegexFilter", `count(prometheus_http_requests_total{handler=~".+"})`, 51, false},
+				{"AllNegativeFilter", `count(prometheus_http_requests_total{"handler"!="clearly-not-exist"})`, 51, false},
+				{"AllNegativeEmptyFilter", `count(prometheus_http_requests_total{"handler"!=""})`, 51, false},
+				{"AllNegativeRegexFilter", `count(prometheus_http_requests_total{"handler"!~"^$"})`, 51, false},
+
+				{"SelectFilter", `count(prometheus_http_requests_total{"handler"="/api/v1/query"})`, 1, false},
+				{"SelectRegexFilter", `count(prometheus_http_requests_total{"handler"=~"^/api/v1/query$"})`, 1, false},
+				// Unanchored regex must still require full match per PromQL semantics:
+				// handler=~"/api/v1/query" must not match "/api/v1/query_range".
+				{"SelectRegexFilterFullMatch", `count(prometheus_http_requests_total{"handler"=~"/api/v1/query"})`, 1, false},
+
+				{"ExcludeFilter", `count(prometheus_http_requests_total{"handler"!="/api/v1/query"})`, 50, false},
+				{"ExcludeRegexFilter", `count(prometheus_http_requests_total{"handler"!~"^/api/v1/query$"})`, 50, false},
+				// Same for negative unanchored regex.
+				{"ExcludeRegexFilterFullMatch", `count(prometheus_http_requests_total{"handler"!~"/api/v1/query"})`, 50, false},
+
+				{"Empty", `count(prometheus_http_requests_total{"handler"="clearly-not-exist"})`, 0, true},
+				{"GroupingEmpty", `sum by (handler) (count(prometheus_http_requests_total{"handler"="clearly-not-exist"}))`, 0, true},
+
+				// count by (__name__) counts series, not values — must not be affected by
+				// the sampled-points pre-aggregation path (which would collapse 51 series to 1).
+				{"CountByName", `count by (__name__) (prometheus_http_requests_total)`, 51, false},
+				// min across all series is 0 because several handlers never receive requests.
+				{"MinByName", `min by (__name__) (prometheus_http_requests_total)`, 0, false},
+				// For a single series whose counter never increments, all four aggregators must return 0
+				// (not produce wrong values from incorrect client-side aggregation logic).
+				{"SumSingleZeroSeries", `sum by (handler) (prometheus_http_requests_total{handler="/api/v1/query"})`, 0, false},
+				{"MinSingleZeroSeries", `min by (handler) (prometheus_http_requests_total{handler="/api/v1/query"})`, 0, false},
+				{"MaxSingleZeroSeries", `max by (handler) (prometheus_http_requests_total{handler="/api/v1/query"})`, 0, false},
+				{"AvgSingleZeroSeries", `avg by (handler) (prometheus_http_requests_total{handler="/api/v1/query"})`, 0, false},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Parallel()
+
+					a := require.New(t)
+
+					r, err := c.GetQueryRange(ctx, promapi.GetQueryRangeParams{
+						Query: tt.query,
+						Start: getPromTS(set.Start),
+						End:   getPromTS(set.End),
+						Step:  promapi.NewOptString("5s"),
+					})
+					a.NoError(err)
+
+					data := r.Data
+					a.Equal(promapi.MatrixData, data.Type)
+
+					mat := data.Matrix.Result
+					if tt.empty {
+						a.Empty(mat)
+					} else {
+						a.Len(mat, 1)
+						values := mat[0].Values
+						a.NotEmpty(values)
+
+						for _, point := range values {
+							a.Equal(tt.count, point.V)
+						}
+					}
+				})
+			}
+		})
+		t.Run("AggregationInvariants", func(t *testing.T) {
+			// Query sum/min/max/avg of the same metric and verify the invariant
+			// min ≤ avg ≤ max ≤ sum holds at every timestamp.
+			// This guards against the aggregateSampledPoints bug where min/max/avg
+			// were all computed as sums.
+			params := func(q string) promapi.GetQueryRangeParams {
+				return promapi.GetQueryRangeParams{
+					Query: q,
+					Start: getPromTS(set.Start),
+					End:   getPromTS(set.End),
+					Step:  promapi.NewOptString("5s"),
+				}
+			}
+			a := require.New(t)
+
+			fetchVals := func(q string) []float64 {
+				r, err := c.GetQueryRange(ctx, params(q))
+				a.NoError(err)
+				a.Equal(promapi.MatrixData, r.Data.Type)
+				mat := r.Data.Matrix.Result
+				a.Len(mat, 1, "query %q should return exactly 1 series", q)
+				a.NotEmpty(mat[0].Values)
+				vals := make([]float64, len(mat[0].Values))
+				for i, p := range mat[0].Values {
+					vals[i] = p.V
+				}
+				return vals
+			}
+
+			const metric = `prometheus_http_requests_total`
+			sumVals := fetchVals(`sum by (__name__) (` + metric + `)`)
+			minVals := fetchVals(`min by (__name__) (` + metric + `)`)
+			maxVals := fetchVals(`max by (__name__) (` + metric + `)`)
+			avgVals := fetchVals(`avg by (__name__) (` + metric + `)`)
+
+			a.Equal(len(sumVals), len(minVals), "series length must match")
+			a.Equal(len(sumVals), len(maxVals), "series length must match")
+			a.Equal(len(sumVals), len(avgVals), "series length must match")
+
+			for i := range sumVals {
+				a.GreaterOrEqualf(sumVals[i], maxVals[i], "sum >= max at index %d", i)
+				a.GreaterOrEqualf(maxVals[i], avgVals[i], "max >= avg at index %d", i)
+				a.GreaterOrEqualf(avgVals[i], minVals[i], "avg >= min at index %d", i)
+				a.GreaterOrEqualf(minVals[i], 0.0, "min >= 0 at index %d", i)
+			}
+		})
+		t.Run("RateFunctions", func(t *testing.T) {
+			// Exercises the rate offloading path in chstorage (rateSelector + queryRatePoints*).
+			// When run via TestCHBackupOldOteldb against an old container, this compares
+			// (indirectly) offloaded results vs the legacy non-offloaded Go path.
+			a := require.New(t)
+
+			params := func(q string) promapi.GetQueryRangeParams {
+				return promapi.GetQueryRangeParams{
+					Query: q,
+					Start: getPromTS(set.Start),
+					End:   getPromTS(set.End),
+					Step:  promapi.NewOptString("30s"),
+				}
+			}
+
+			for _, tc := range []struct {
+				name  string
+				query string
+				check func(float64)
+			}{
+				{"rate", `rate(prometheus_http_requests_total[1m])`, func(v float64) { a.GreaterOrEqual(v, 0.0) }},
+				{"increase", `increase(prometheus_http_requests_total[5m])`, func(v float64) { a.GreaterOrEqual(v, 0.0) }},
+				{"delta", `delta(prometheus_http_requests_total[2m])`, func(v float64) { /* delta can be negative for gauges, but this counter is non-decreasing */
+					a.GreaterOrEqual(v, 0.0)
+				}},
+				{"irate", `irate(prometheus_http_requests_total[1m])`, func(v float64) { a.GreaterOrEqual(v, 0.0) }},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					r, err := c.GetQueryRange(ctx, params(tc.query))
+					a.NoError(err)
+					a.Equal(promapi.MatrixData, r.Data.Type)
+					a.NotEmpty(r.Data.Matrix.Result, "expected at least one series for %s", tc.query)
+					for _, series := range r.Data.Matrix.Result {
+						for _, pt := range series.Values {
+							tc.check(pt.V)
+						}
+					}
+				})
+			}
+		})
+		t.Run("Histogram", func(t *testing.T) {
+			a := require.New(t)
+
+			r, err := c.GetQueryRange(ctx, promapi.GetQueryRangeParams{
+				Query: `prometheus_http_response_size_bytes_bucket{handler="/api/v1/write", le="+Inf"}`,
+				Start: getPromTS(set.Start),
+				End:   getPromTS(set.End),
+				Step:  promapi.NewOptString("5s"),
+			})
+			a.NoError(err)
+
+			data := r.Data
+			a.Equal(promapi.MatrixData, data.Type)
+
+			mat := data.Matrix.Result
+			a.Len(mat, 1)
+
+			a.Equal(mat[0].Metric["le"], "+Inf")
+			values := mat[0].Values
+			a.NotEmpty(values)
+		})
+	})
+	t.Run("Metadata", func(t *testing.T) {
+		if oldBide {
+			t.Skip("Metadata endpoint was not supported at the moment")
+			return
+		}
 		a := require.New(t)
 
-		r, err := c.GetQueryRange(ctx, promapi.GetQueryRangeParams{
-			Query: `count(prometheus_http_requests_total{})`,
-			Start: getPromTS(set.Start),
-			End:   getPromTS(set.End),
-			Step:  "5s",
+		resp, err := c.GetMetadata(ctx, promapi.GetMetadataParams{
+			Metric: promapi.NewOptString(`process_cpu_seconds`),
 		})
 		a.NoError(err)
+		a.Equal("success", resp.Status)
 
-		data := r.Data
-		a.Equal(promapi.MatrixData, data.Type)
+		data := resp.Data
+		a.Contains(data, "process_cpu_seconds")
+		metadatas := data["process_cpu_seconds"]
 
-		mat := data.Matrix.Result
-		a.Len(mat, 1)
-		values := mat[0].Values
-		a.NotEmpty(values)
-
-		for _, point := range values {
-			a.Equal(float64(51), point.V)
+		a.Len(metadatas, 1)
+		metadata := metadatas[0]
+		a.Equal(promapi.MetricMetadata{
+			Type: promapi.NewOptMetricMetadataType(promapi.MetricMetadataTypeCounter),
+			Help: promapi.NewOptString("Total CPU user and system time in seconds"),
+			Unit: promapi.NewOptString("s"),
+		}, metadata)
+	})
+	t.Run("QueryFrom_vmalert", func(t *testing.T) {
+		client := datasource.NewPrometheusClient(serverURL, nil, false, http.DefaultClient)
+		client.ApplyParams(datasource.QuerierParams{
+			QueryParams: url.Values{
+				"step": []string{"5s"},
+			},
+			Headers: map[string]string{
+				"Content-Type": "application/x-www-form-urlencoded",
+			},
+		})
+		r, err := client.QueryRange(ctx, `count(prometheus_http_requests_total{})`,
+			set.Start.AsTime(),
+			set.End.AsTime(),
+		)
+		require.NoError(t, err)
+		require.NotEmpty(t, r.Data)
+		m := r.Data[0]
+		for _, v := range m.Values {
+			require.Equal(t, float64(51), v)
 		}
 	})
+}
+
+func except(s []string, not ...string) []string {
+	r := make([]string, 0, len(s))
+	for _, v := range s {
+		if !slices.Contains(not, v) {
+			r = append(r, v)
+		}
+	}
+	return r
 }
 
 func getPromTS(ts pcommon.Timestamp) promapi.PrometheusTimestamp {

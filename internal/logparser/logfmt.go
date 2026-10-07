@@ -1,117 +1,103 @@
 package logparser
 
 import (
-	"encoding/hex"
-	"strings"
-	"time"
-	"unicode"
+	"math/bits"
 
 	"github.com/go-faster/jx"
-	"github.com/google/uuid"
 	"github.com/kr/logfmt"
-	"go.opentelemetry.io/collector/pdata/pcommon"
 
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/otelstorage"
 )
 
 // LogFmtParser parses logfmt lines.
 type LogFmtParser struct{}
 
+var _ Parser = (*LogFmtParser)(nil)
+
+func init() {
+	p := &LogFmtParser{}
+	formatRegistry.Store(p.String(), p)
+}
+
 // Parse line.
-func (LogFmtParser) Parse(data []byte) (*Line, error) {
-	line := &Line{}
-	attrs := pcommon.NewMap()
-	hf := logfmt.HandlerFunc(func(key, val []byte) error {
-		k := string(key)
-		v := string(val)
-		switch k {
-		case "msg":
-			line.Body = v
-		case "level", "lvl", "levelStr", "severity_text", "severity", "levelname":
-			if v == "" {
-				attrs.PutStr(k, v)
-				return nil
-			}
-			line.SeverityText = v
-			line.SeverityNumber = _severityMap[unicode.ToLower(rune(v[0]))]
-		case "span_id", "spanid", "spanID", "spanId":
-			raw, _ := hex.DecodeString(v)
-			if len(raw) != 8 {
-				attrs.PutStr(k, v)
-				return nil
-			}
-			var spanID otelstorage.SpanID
-			copy(spanID[:], raw)
-			line.SpanID = spanID
-		case "trace_id", "traceid", "traceID", "traceId":
-			traceID, err := otelstorage.ParseTraceID(strings.ToLower(v))
-			if err != nil {
-				// Trying to parse as UUID.
-				id, err := uuid.Parse(v)
-				if err != nil {
-					attrs.PutStr(k, v)
-					return nil
-				}
-				traceID = otelstorage.TraceID(id)
-			}
-			line.TraceID = traceID
-		case "t", "ts", "time", "@timestamp", "timestamp":
-			for _, layout := range []string{
-				time.RFC3339Nano,
-				time.RFC3339,
-				ISO8601Millis,
-			} {
-				ts, err := time.Parse(layout, v)
-				if err != nil {
-					continue
-				}
-				line.Timestamp = otelstorage.Timestamp(ts.UnixNano())
-			}
-			if line.Timestamp == 0 {
-				attrs.PutStr(k, v)
-			}
-		default:
-			// Try to deduct a type.
-			if v == "" {
-				attrs.PutBool(k, true)
-				return nil
-			}
-			dec := jx.DecodeBytes(val)
-			switch dec.Next() {
-			case jx.Number:
-				n, err := dec.Num()
-				if err == nil && n.IsInt() {
-					i, err := n.Int64()
-					if err == nil {
-						attrs.PutInt(k, i)
-						return nil
-					}
-				} else if err == nil {
-					f, err := n.Float64()
-					if err == nil {
-						attrs.PutDouble(k, f)
-						return nil
-					}
-				}
-			case jx.Bool:
-				v, err := dec.Bool()
-				if err == nil {
-					attrs.PutBool(k, v)
-					return nil
-				}
-			}
-			// Fallback.
-			attrs.PutStr(k, v)
+func (LogFmtParser) Parse(data string, target *Record) error {
+	return logfmt.Unmarshal([]byte(data), target)
+}
+
+func (r *Record) HandleLogfmt(key, val []byte) error {
+	if r.Attrs.IsZero() {
+		r.Attrs = otelstorage.NewAttrs()
+	}
+	attrs := r.Attrs.AsMap()
+
+	ftyp, _ := deduceFieldType(key)
+	switch ftyp {
+	case messageField:
+		r.Body = string(val)
+	case levelField:
+		if len(val) == 0 {
+			attrs.PutStr(string(key), string(val))
+			return nil
 		}
-		return nil
-	})
-	if err := logfmt.Unmarshal(data, hf); err != nil {
-		return nil, err
+		r.SeverityText = string(val)
+		r.SeverityNumber = DeduceSeverity(r.SeverityText)
+	case spanIDField:
+		spanID, ok := ParseSpanID(val)
+		if !ok {
+			attrs.PutStr(string(key), string(val))
+			return nil
+		}
+		r.SpanID = spanID
+	case traceIDField:
+		val := string(val)
+		traceID, ok := ParseTraceID(val)
+		if !ok {
+			attrs.PutStr(string(key), val)
+			return nil
+		}
+		r.TraceID = traceID
+	case timestampField:
+		ts, ok := ParseTimestamp(val)
+		if ok {
+			r.Timestamp = ts
+			return nil
+		}
+		attrs.PutStr(string(key), string(val))
+	default:
+		k, v := string(key), string(val)
+		// Try to deduce a type.
+		if v == "" {
+			attrs.PutBool(k, true)
+			return nil
+		}
+		dec := jx.DecodeBytes(val)
+		switch dec.Next() {
+		case jx.Number:
+			n, err := dec.Num()
+			if err == nil && n.IsInt() {
+				i, err := n.Int64()
+				if err == nil {
+					attrs.PutInt(k, i)
+					return nil
+				}
+			} else if err == nil {
+				f, err := n.Float64()
+				if err == nil {
+					attrs.PutDouble(k, f)
+					return nil
+				}
+			}
+		case jx.Bool:
+			v, err := dec.Bool()
+			if err == nil {
+				attrs.PutBool(k, v)
+				return nil
+			}
+		}
+		// Fallback.
+		attrs.PutStr(k, v)
 	}
-	if attrs.Len() > 0 {
-		line.Attrs = otelstorage.Attrs(attrs)
-	}
-	return line, nil
+	return nil
 }
 
 func (LogFmtParser) String() string {
@@ -126,8 +112,21 @@ func (LogFmtParser) Detect(line string) bool {
 	if line[0] == '{' {
 		return false
 	}
-	noop := logfmt.HandlerFunc(func(_, _ []byte) error {
+
+	// Collect a bitset of detected field types.
+	var detectedFields uint64
+	noop := logfmt.HandlerFunc(func(k, _ []byte) error {
+		ftyp, ok := deduceFieldType(k)
+		if ok {
+			detectedFields |= 1 << uint64(ftyp)
+		}
 		return nil
 	})
-	return logfmt.Unmarshal([]byte(line), noop) == nil
+	if err := logfmt.Unmarshal([]byte(line), noop); err != nil {
+		return false
+	}
+
+	// A bit of bit magic: ensure we met at least two of useful fields.
+	detectedFields &= 1<<levelField | 1<<timestampField | 1<<messageField
+	return bits.OnesCount64(detectedFields) >= 2
 }

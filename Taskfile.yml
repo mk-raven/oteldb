@@ -1,13 +1,19 @@
 # https://taskfile.dev
-version: '3'
+version: "3"
 
 env:
   GO111MODULE: on
   GOPROXY: https://proxy.golang.org,direct
-  IMAGE: '{{default "registry.localhost/go-faster/oteldb" .IMAGE}}'
+  IMAGE: '{{default "registry.localhost/oteldb/oteldb" .IMAGE}}'
 
 vars:
   DOCKER: '{{default "docker" .DOCKER}}'
+  REGISTRY:
+    sh: 'printf "%s" "${REGISTRY:-}"'
+  TAG:
+    sh: git log --pretty='%h' -1
+  PUSH_ARG:
+    sh: 'if [[ -n "${PUSH:-}" ]]; then echo "--push"; fi'
 
 tasks:
   setup:
@@ -23,6 +29,66 @@ tasks:
       - ./oteldb
     cmds:
       - go build -o ./oteldb ./cmd/oteldb
+
+  build:odbagent:
+    desc: Build the odbagent binary
+    sources:
+      - ./**/*.go
+    generates:
+      - ./bin/odbagent
+    cmds:
+      - mkdir -p ./bin
+      - go build -o ./bin/odbagent ./cmd/odbagent
+
+  build-deploy:
+    desc: Build binaries for deploy images
+    env:
+      CGO_ENABLED: 0
+    cmds:
+      - |
+        set -e
+        for target in oteldb odbbackup odbrestore odbmigrate odbingest odbselect otelproxy chotel odbagent; do
+          go build -trimpath -buildvcs=false -v -o ./$target ./cmd/$target
+        done
+
+  deploy:images:
+    desc: Build deploy images, set PUSH=1 to push
+    deps:
+      - build-deploy
+    preconditions:
+      - sh: test -n "${REGISTRY:-}"
+        msg: "REGISTRY is required, for example: REGISTRY=ghcr.io/oteldb"
+    cmds:
+      - task: deploy:image:oteldb
+      - for: [chotel]
+        task: deploy:image:generic
+        vars:
+          BINARY: "{{.ITEM}}"
+      - task: deploy:image:odbagent
+
+  deploy:image:oteldb:
+    desc: Build the oteldb deploy image
+    preconditions:
+      - sh: test -n "${REGISTRY:-}"
+        msg: "REGISTRY is required, for example: REGISTRY=ghcr.io/oteldb"
+    cmds:
+      - '{{.DOCKER}} build -t "{{.REGISTRY}}/oteldb:{{.TAG}}" {{.PUSH_ARG}} -f dev/deploy/deploy.Dockerfile .'
+
+  deploy:image:generic:
+    desc: Build a generic single-binary deploy image (pass BINARY=xxx)
+    preconditions:
+      - sh: test -n "${REGISTRY:-}"
+        msg: "REGISTRY is required, for example: REGISTRY=ghcr.io/oteldb"
+    cmds:
+      - '{{.DOCKER}} build -t "{{.REGISTRY}}/{{.BINARY}}:{{.TAG}}" {{.PUSH_ARG}} --build-arg BINARY={{.BINARY}} -f dev/deploy/deploy.generic.Dockerfile .'
+
+  deploy:image:odbagent:
+    desc: Build the odbagent deploy image
+    preconditions:
+      - sh: test -n "${REGISTRY:-}"
+        msg: "REGISTRY is required, for example: REGISTRY=ghcr.io/oteldb"
+    cmds:
+      - '{{.DOCKER}} build -t "{{.REGISTRY}}/odbagent:{{.TAG}}" {{.PUSH_ARG}} -f dev/deploy/deploy.odbagent.Dockerfile .'
 
   test:
     desc: Run tests
@@ -41,9 +107,9 @@ tasks:
       - go tool cover -html=coverage.txt
 
   fmt:
-    desc: gofumpt all code
+    desc: format all code
     cmds:
-      - gofumpt -w -l .
+      - golangci-lint fmt ./...
 
   lint:
     desc: Lint the code with golangci-lint

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-faster/oteldb/internal/tempoapi"
-	"github.com/go-faster/oteldb/internal/traceql/traceqlengine"
+	"github.com/oteldb/oteldb/internal/tempoapi"
+	"github.com/oteldb/oteldb/internal/traceql/traceqlengine"
 
 	"github.com/stretchr/testify/require"
 )
@@ -13,7 +13,7 @@ import (
 func BenchmarkTraceQL(b *testing.B) {
 	ctx := context.Background()
 
-	set, err := readBatchSet("_testdata/traces.json")
+	set, err := readBatchSet()
 	require.NoError(b, err)
 
 	b.ReportAllocs()

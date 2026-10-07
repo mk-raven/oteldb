@@ -9,8 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/tracestorage"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/traceql"
+	"github.com/oteldb/oteldb/internal/tracestorage"
 )
 
 type spanIDs struct {
@@ -42,6 +43,79 @@ func generateSpans(ids []spanIDs, group string) []tracestorage.Span {
 		})
 	}
 	return result
+}
+
+func TestBuildSpansetOpEmptySide(t *testing.T) {
+	// A structural operator must return an empty result, rather than panic or
+	// error, when either side matches nothing.
+	ops := []traceql.SpansetOp{
+		traceql.SpansetOpChild,
+		traceql.SpansetOpSibling,
+		traceql.SpansetOpDescendant,
+		traceql.SpansetOpAnd,
+		traceql.SpansetOpUnion,
+	}
+	nonEmpty := []Spanset{{Spans: generateSpans([]spanIDs{{id: 1}, {id: 2, parent: 1}}, "set")}}
+
+	tests := []struct {
+		name string
+		a, b []Spanset
+	}{
+		{"BothEmpty", nil, nil},
+		{"LeftEmpty", nil, nonEmpty},
+		{"RightEmpty", nonEmpty, nil},
+	}
+	for _, op := range ops {
+		t.Run(op.String(), func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					fn, err := buildSpansetOp(op)
+					require.NoError(t, err)
+
+					result, err := fn(tt.a, tt.b)
+					require.NoError(t, err)
+					if op == traceql.SpansetOpUnion && (len(tt.a) > 0 || len(tt.b) > 0) {
+						// Union keeps whatever the non-empty side has.
+						require.NotEmpty(t, result)
+						return
+					}
+					require.Empty(t, result)
+				})
+			}
+		})
+	}
+}
+
+func TestBuildSpansetOpMultipleSpansets(t *testing.T) {
+	// Structural operators can't join multiple spansets at once.
+	ops := []traceql.SpansetOp{
+		traceql.SpansetOpChild,
+		traceql.SpansetOpSibling,
+		traceql.SpansetOpDescendant,
+	}
+	one := []Spanset{{Spans: generateSpans([]spanIDs{{id: 1}}, "set")}}
+	two := append(slices.Clone(one), Spanset{Spans: generateSpans([]spanIDs{{id: 2}}, "set")})
+
+	for _, op := range ops {
+		t.Run(op.String(), func(t *testing.T) {
+			fn, err := buildSpansetOp(op)
+			require.NoError(t, err)
+
+			for _, tt := range []struct {
+				name string
+				a, b []Spanset
+			}{
+				{"Left", two, one},
+				{"Right", one, two},
+				{"Both", two, two},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					_, err := fn(tt.a, tt.b)
+					require.Error(t, err)
+				})
+			}
+		})
+	}
 }
 
 func TestChildSpans(t *testing.T) {
@@ -86,9 +160,89 @@ func TestChildSpans(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			result := childSpans(
+				Spanset{
+					Spans: generateSpans(tt.left, "left"),
+				},
+				Spanset{
+					Spans: generateSpans(tt.right, "right"),
+				},
+			)
+
+			var got []uint64
+			for _, span := range result {
+				got = append(got, span.SpanID.AsUint64())
+			}
+			slices.Sort(got)
+			require.Equal(t, tt.wantResult, got)
+		})
+	}
+}
+
+func TestDescendantSpans(t *testing.T) {
+	tests := []struct {
+		left, right []spanIDs
+		wantResult  []uint64
+	}{
+		{
+			nil,
+			nil,
+			nil,
+		},
+		// Transitive: grandchildren count too. 6's parent (4) is not in left, but 4
+		// descends from 2, so 6 is a descendant of 2 — unlike `>` (childSpans), which
+		// would omit 6.
+		{
+			[]spanIDs{
+				{id: 1},
+				{id: 2},
+				{id: 3},
+			},
+			[]spanIDs{
+				{id: 1},
+				{id: 4, parent: 2},
+				{id: 5, parent: 3},
+				{id: 6, parent: 4},
+				{id: 7, parent: 3},
+			},
+			[]uint64{
+				4, 5, 6, 7,
+			},
+		},
+		// A deep chain whose intermediate spans live only in right: every link descends
+		// from the single left ancestor.
+		{
+			[]spanIDs{
+				{id: 1},
+			},
+			[]spanIDs{
+				{id: 2, parent: 1},
+				{id: 3, parent: 2},
+				{id: 4, parent: 3},
+			},
+			[]uint64{
+				2, 3, 4,
+			},
+		},
+		// No span descends from any left span.
+		{
+			[]spanIDs{
+				{id: 1},
+				{id: 2},
+				{id: 3},
+			},
+			[]spanIDs{
+				{id: 4, parent: 11},
+				{id: 5, parent: 12},
+				{id: 6, parent: 13},
+			},
+			nil,
+		},
+	}
+	for i, tt := range tests {
+		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
+			result := descendantSpans(
 				Spanset{
 					Spans: generateSpans(tt.left, "left"),
 				},
@@ -191,7 +345,6 @@ func TestSiblingSpans(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			result := siblingSpans(
 				Spanset{
@@ -208,6 +361,31 @@ func TestSiblingSpans(t *testing.T) {
 			}
 			slices.Sort(got)
 			require.Equal(t, tt.wantResult, got)
+		})
+	}
+}
+
+func TestBuildSpansetOpUnsupported(t *testing.T) {
+	// Parsed by the frontend, but the engine has no implementation yet.
+	ops := []traceql.SpansetOp{
+		traceql.SpansetOpParent,
+		traceql.SpansetOpAncestor,
+		traceql.SpansetOpNotChild,
+		traceql.SpansetOpNotParent,
+		traceql.SpansetOpNotDescendant,
+		traceql.SpansetOpNotAncestor,
+		traceql.SpansetOpNotSibling,
+		traceql.SpansetOpUnionChild,
+		traceql.SpansetOpUnionParent,
+		traceql.SpansetOpUnionDescendant,
+		traceql.SpansetOpUnionAncestor,
+		traceql.SpansetOpUnionSibling,
+	}
+	for _, op := range ops {
+		t.Run(op.String(), func(t *testing.T) {
+			fn, err := buildSpansetOp(op)
+			require.ErrorContains(t, err, "not supported yet")
+			require.Nil(t, fn)
 		})
 	}
 }

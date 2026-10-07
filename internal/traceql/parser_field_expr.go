@@ -2,11 +2,13 @@ package traceql
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
+	"github.com/go-faster/errors"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
-	"github.com/go-faster/oteldb/internal/traceql/lexer"
+	"github.com/oteldb/oteldb/internal/traceql/lexer"
 )
 
 func (p *parser) parseFieldExpr() (FieldExpr, error) {
@@ -66,7 +68,10 @@ func (p *parser) parseFieldExpr1() (FieldExpr, error) {
 			return s, nil
 		}
 
-		if a, ok := p.tryAttribute(); ok {
+		switch a, ok, err := p.tryAttribute(); {
+		case err != nil:
+			return nil, err
+		case ok:
 			return &a, nil
 		}
 		return nil, p.unexpectedToken(t)
@@ -232,13 +237,25 @@ func (p *parser) tryStatic() (s *Static, ok bool, _ error) {
 	case lexer.KindConsumer:
 		p.next()
 		s.SetSpanKind(ptrace.SpanKindConsumer)
+	case lexer.Ident:
+		// The only bare identifiers TraceQL defines are these two int constants.
+		switch t.Text {
+		case "minInt":
+			p.next()
+			s.SetInt(math.MinInt64)
+		case "maxInt":
+			p.next()
+			s.SetInt(math.MaxInt64)
+		default:
+			return s, false, nil
+		}
 	default:
 		return s, false, nil
 	}
 	return s, true, nil
 }
 
-func (p *parser) tryAttribute() (a Attribute, _ bool) {
+func (p *parser) tryAttribute() (a Attribute, _ bool, _ error) {
 	switch t := p.peek(); t.Type {
 	case lexer.SpanDuration:
 		a.Prop = SpanDuration
@@ -248,6 +265,8 @@ func (p *parser) tryAttribute() (a Attribute, _ bool) {
 		a.Prop = SpanName
 	case lexer.Status:
 		a.Prop = SpanStatus
+	case lexer.StatusMessage:
+		a.Prop = SpanStatusMessage
 	case lexer.Kind:
 		a.Prop = SpanKind
 	case lexer.Parent:
@@ -258,38 +277,209 @@ func (p *parser) tryAttribute() (a Attribute, _ bool) {
 		a.Prop = RootServiceName
 	case lexer.TraceDuration:
 		a.Prop = TraceDuration
+	case lexer.NestedSetLeft:
+		a.Prop = NestedSetLeft
+	case lexer.NestedSetRight:
+		a.Prop = NestedSetRight
+	case lexer.NestedSetParent:
+		a.Prop = NestedSetParent
+	case lexer.TraceColon:
+		p.next()
+		a, ok := p.parseScopedTraceIntrinsic()
+		return a, ok, nil
+	case lexer.SpanColon:
+		p.next()
+		a, ok := p.parseScopedSpanIntrinsic()
+		return a, ok, nil
+	case lexer.EventColon:
+		p.next()
+		a, ok := p.parseScopedEventIntrinsic()
+		return a, ok, nil
+	case lexer.LinkColon:
+		p.next()
+		a, ok := p.parseScopedLinkIntrinsic()
+		return a, ok, nil
+	case lexer.InstrumentationColon:
+		p.next()
+		a, ok := p.parseScopedInstrumentationIntrinsic()
+		return a, ok, nil
 	case lexer.Ident:
-		parseAttributeSelector(t.Text, &a)
+		if err := parseAttributeSelector(t.Text, &a); err != nil {
+			return a, false, &SyntaxError{Msg: err.Error(), Pos: t.Pos}
+		}
 	default:
-		return a, false
+		return a, false, nil
 	}
 	p.next()
 
+	return a, true, nil
+}
+
+func (p *parser) parseScopedTraceIntrinsic() (a Attribute, _ bool) {
+	switch p.peek().Type {
+	case lexer.SpanDuration:
+		a.Prop = TraceDuration
+	case lexer.RootName:
+		a.Prop = RootSpanName
+	case lexer.RootService:
+		a.Prop = RootServiceName
+	case lexer.ID:
+		a.Prop = TraceID
+	default:
+		p.unread() // unread trace:
+		return a, false
+	}
+	p.next()
 	return a, true
 }
 
-func parseAttributeSelector(attr string, a *Attribute) {
+func (p *parser) parseScopedSpanIntrinsic() (a Attribute, _ bool) {
+	switch p.peek().Type {
+	case lexer.SpanDuration:
+		a.Prop = SpanDuration
+	case lexer.Name:
+		a.Prop = SpanName
+	case lexer.Kind:
+		a.Prop = SpanKind
+	case lexer.Status:
+		a.Prop = SpanStatus
+	case lexer.StatusMessage:
+		a.Prop = SpanStatusMessage
+	case lexer.ID:
+		a.Prop = SpanID
+	case lexer.ParentID:
+		a.Prop = ParentID
+	case lexer.ChildCount:
+		a.Prop = SpanChildCount
+	default:
+		p.unread() // unread span:
+		return a, false
+	}
+	p.next()
+	return a, true
+}
+
+func (p *parser) parseScopedEventIntrinsic() (a Attribute, _ bool) {
+	switch p.peek().Type {
+	case lexer.Name:
+		a.Prop = EventName
+	case lexer.TimeSinceStart:
+		a.Prop = EventTimeSinceStart
+	default:
+		p.unread() // unread event:
+		return a, false
+	}
+	p.next()
+	return a, true
+}
+
+func (p *parser) parseScopedLinkIntrinsic() (a Attribute, _ bool) {
+	switch p.peek().Type {
+	case lexer.TraceID:
+		a.Prop = LinkTraceID
+	case lexer.SpanID:
+		a.Prop = LinkSpanID
+	default:
+		p.unread() // unread link:
+		return a, false
+	}
+	p.next()
+	return a, true
+}
+
+func (p *parser) parseScopedInstrumentationIntrinsic() (a Attribute, _ bool) {
+	switch p.peek().Type {
+	case lexer.Name:
+		a.Prop = InstrumentationName
+	case lexer.Version:
+		a.Prop = InstrumentationVersion
+	default:
+		p.unread() // unread instrumentation:
+		return a, false
+	}
+	p.next()
+	return a, true
+}
+
+func parseAttributeSelector(attr string, a *Attribute) error {
 	attr, a.Parent = strings.CutPrefix(attr, "parent.")
 
+	// The scope prefix is never quoted, so the first dot always separates it
+	// from the name, even when the name itself contains quoted dots.
 	uncut := attr
-	scope, attr, ok := strings.Cut(attr, ".")
+	scope, name, ok := strings.Cut(attr, ".")
 	if !ok {
-		a.Name = uncut
-		return
+		if !a.Parent {
+			// A bare word is not an attribute selector: a scope prefix
+			// ("span.", "resource.", ...) or a leading dot is required.
+			return errors.Errorf("unknown identifier %q", uncut)
+		}
+		return setAttributeName(a, uncut)
 	}
 
 	switch scope {
 	case "resource":
-		a.Name = attr
 		a.Scope = ScopeResource
 	case "span":
-		a.Name = attr
 		a.Scope = ScopeSpan
+	case "instrumentation":
+		a.Scope = ScopeInstrumentation
+	case "event":
+		a.Scope = ScopeEvent
+	case "link":
+		a.Scope = ScopeLink
 	case "":
-		a.Name = attr
 		a.Scope = ScopeNone
 	default:
-		a.Name = uncut
+		// Not a scope prefix, so the whole selector is the name.
 		a.Scope = ScopeNone
+		return setAttributeName(a, uncut)
 	}
+	return setAttributeName(a, name)
+}
+
+func setAttributeName(a *Attribute, name string) error {
+	name, err := decodeAttributeName(name)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		return errors.New("attribute name is empty")
+	}
+	a.Name = name
+	return nil
+}
+
+// decodeAttributeName strips the quotes the lexer kept, so that
+// `span."foo bar"` yields `foo bar`.
+//
+// The lexer has already checked that quotes are balanced and escapes are valid.
+func decodeAttributeName(name string) (string, error) {
+	if !strings.ContainsRune(name, '"') {
+		return name, nil
+	}
+
+	var (
+		sb     strings.Builder
+		quoted bool
+	)
+	sb.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		switch c := name[i]; {
+		case c == '"':
+			quoted = !quoted
+		case quoted && c == '\\':
+			i++
+			if i >= len(name) {
+				return "", errors.New("invalid escape sequence")
+			}
+			sb.WriteByte(name[i])
+		default:
+			sb.WriteByte(c)
+		}
+	}
+	if quoted {
+		return "", errors.New(`unexpected end of attribute, expecting '"'`)
+	}
+	return sb.String(), nil
 }

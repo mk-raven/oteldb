@@ -6,17 +6,20 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  id-token: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           submodules: true
 
       - name: Install Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: stable
           cache: false
@@ -29,7 +32,7 @@ jobs:
           echo "modcache=$(go env GOMODCACHE)" >> $GITHUB_ENV
 
       - name: Set up cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ env.cache }}
@@ -42,13 +45,13 @@ jobs:
         env:
           E2E: "1"
           TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: go test -timeout 15m -race -v -coverpkg=./... -coverprofile=profile.out ./...
+        run: go test -timeout 15m -race -coverpkg=./... -coverprofile=profile.out ./...
 
       - name: Emit coverage
         run: go tool cover -func profile.out
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: profile.out
@@ -61,15 +64,16 @@ jobs:
       - test
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Download artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: coverage
 
       - name: Send coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: profile.out
           fail_ci_if_error: true
+          use_oidc: true

@@ -1,0 +1,19 @@
+# Shared config for every node in the storage cluster. Each node serves all signals from its own
+# local file backend (--embedded is passed on the command line) and joins the cluster via etcd. The
+# node's ring identity and replication address default to its hostname, so all three services use
+# this one file unchanged — only their `hostname:` differs in docker-compose.yml.
+storage:
+  backend: file
+  # Parts in /data/parts, the write-ahead log in /data/wal: one volume, so they stay consistent.
+  # wal_dir would override the WAL location.
+  dir: /data
+  cluster:
+    etcd: ["http://etcd:2379"]
+    # id and addr are derived from the container hostname (e.g. oteldb-1 -> addr oteldb-1:7946).
+    port: 7946
+    # Replication factor: each write is stored on 2 of the 3 nodes (tolerates one node down).
+    rf: 2
+    root: /oteldb
+    # Each node's file backend is its own volume, not a store the peers can read, so flushed parts
+    # must be replicated node-to-node (partsync) instead of exchanged through the backend.
+    private_backend: true

@@ -1,0 +1,6 @@
+node_modules
+# dist is NOT committed: it is built by CI, by the bun stage in dev/Dockerfile, and on
+# release. Only the .gitkeep placeholder is tracked, so `go:embed all:frontend/dist` compiles
+# on a clean checkout.
+*.tsbuildinfo
+.vite

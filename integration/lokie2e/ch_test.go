@@ -1,92 +1,37 @@
 package lokie2e_test
 
 import (
-	"context"
-	"crypto/rand"
-	"fmt"
+	"strings"
 	"testing"
-	"time"
 
-	"github.com/ClickHouse/ch-go"
-	"github.com/ClickHouse/ch-go/chpool"
-	"github.com/cenkalti/backoff/v4"
-	"github.com/go-faster/errors"
 	"github.com/go-faster/sdk/zctx"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	testcontainerslog "github.com/testcontainers/testcontainers-go/log"
 
-	"github.com/go-faster/oteldb/integration"
-	"github.com/go-faster/oteldb/internal/chstorage"
+	"github.com/oteldb/oteldb/integration"
+	"github.com/oteldb/oteldb/integration/lokie2e"
+	"github.com/oteldb/oteldb/internal/chstorage"
 )
-
-func randomPrefix() string {
-	var data [6]byte
-	_, _ = rand.Read(data[:])
-	return fmt.Sprintf("%x", data[:])
-}
 
 func TestCH(t *testing.T) {
 	integration.Skip(t)
-	ctx := context.Background()
-	provider := integration.TraceProvider(t)
-
-	req := testcontainers.ContainerRequest{
-		Name:         "oteldb-lokie2e-clickhouse",
-		Image:        "clickhouse/clickhouse-server:23.12",
-		ExposedPorts: []string{"8123/tcp", "9000/tcp"},
-	}
-	chContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-		Logger:           testcontainerslog.TestLogger(t),
-		Reuse:            true,
+	var (
+		ctx         = t.Context()
+		provider    = integration.TraceProvider(t)
+		tablePrefix = strings.ReplaceAll(uuid.NewString(), "-", "")
+	)
+	_, c, tables := integration.SetupCH(t, integration.SetupCHOptions{
+		Name:           "lokie2e",
+		TablePrefix:    tablePrefix,
+		TracerProvider: provider,
 	})
-	require.NoError(t, err, "container start")
-
-	endpoint, err := chContainer.PortEndpoint(ctx, "9000", "")
-	require.NoError(t, err, "container endpoint")
-
-	opts := ch.Options{
-		Address:  endpoint,
-		Database: "default",
-
-		OpenTelemetryInstrumentation: true,
-		TracerProvider:               provider,
-	}
-
-	connectBackoff := backoff.NewExponentialBackOff()
-	connectBackoff.InitialInterval = 2 * time.Second
-	connectBackoff.MaxElapsedTime = time.Minute
-	c, err := backoff.RetryWithData(func() (*chpool.Pool, error) {
-		c, err := chpool.Dial(ctx, chpool.Options{
-			ClientOptions: opts,
-		})
-		if err != nil {
-			return nil, errors.Wrap(err, "dial")
-		}
-		return c, nil
-	}, connectBackoff)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	prefix := randomPrefix()
-	tables := chstorage.DefaultTables()
-	tables.TTL = time.Since(time.Date(2010, 1, 1, 1, 1, 1, 1, time.UTC))
-	tables.Each(func(name *string) error {
-		old := *name
-		*name = prefix + "_" + old
-		return nil
-	})
-	t.Logf("Test tables prefix: %s", prefix)
-	require.NoError(t, tables.Create(ctx, c))
 
 	inserter, err := chstorage.NewInserter(c, chstorage.InserterOptions{
 		Tables:         tables,
 		TracerProvider: provider,
 	})
 	require.NoError(t, err)
+	set := loadTestData(ctx, t, inserter)
 
 	querier, err := chstorage.NewQuerier(c, chstorage.QuerierOptions{
 		Tables:         tables,
@@ -95,5 +40,58 @@ func TestCH(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx = zctx.Base(ctx, integration.Logger(t))
-	runTest(ctx, t, provider, inserter, querier, querier)
+	runTest(ctx, t, provider, set, querier, querier)
+}
+
+func TestCHBackup(t *testing.T) {
+	t.Parallel()
+	integration.Skip(t)
+	var (
+		ctx         = t.Context()
+		provider    = integration.TraceProvider(t)
+		tablePrefix = strings.ReplaceAll(uuid.NewString(), "-", "")
+
+		backupDir = t.TempDir()
+		set       *lokie2e.BatchSet
+	)
+
+	// Create backup.
+	{
+		_, client, tables := integration.SetupCH(t, integration.SetupCHOptions{
+			Name:           "lokie2e-backup",
+			TablePrefix:    tablePrefix,
+			TracerProvider: provider,
+		})
+
+		inserter, err := chstorage.NewInserter(client, chstorage.InserterOptions{
+			Tables:         tables,
+			TracerProvider: provider,
+		})
+		require.NoError(t, err)
+		set = loadTestData(ctx, t, inserter)
+
+		b := chstorage.NewBackup(client, tables, integration.Logger(t).Named("backup"))
+		require.NoError(t, b.Create(ctx, backupDir))
+	}
+
+	// Restore from backup and check.
+	{
+		_, client, tables := integration.SetupCH(t, integration.SetupCHOptions{
+			Name:           "lokie2e-restore",
+			TablePrefix:    tablePrefix,
+			TracerProvider: provider,
+		})
+
+		r := chstorage.NewRestore(client, tables, integration.Logger(t).Named("restore"))
+		require.NoError(t, r.Restore(ctx, backupDir))
+
+		querier, err := chstorage.NewQuerier(client, chstorage.QuerierOptions{
+			Tables:         tables,
+			TracerProvider: provider,
+		})
+		require.NoError(t, err)
+
+		ctx = zctx.Base(ctx, integration.Logger(t))
+		runTest(ctx, t, provider, set, querier, querier)
+	}
 }

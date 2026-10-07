@@ -70,15 +70,53 @@ func _() {
 	_ = x[By-59]
 	_ = x[Coalesce-60]
 	_ = x[Select-61]
+	_ = x[TraceColon-62]
+	_ = x[SpanColon-63]
+	_ = x[EventColon-64]
+	_ = x[LinkColon-65]
+	_ = x[InstrumentationColon-66]
+	_ = x[StatusMessage-67]
+	_ = x[RootService-68]
+	_ = x[NestedSetLeft-69]
+	_ = x[NestedSetRight-70]
+	_ = x[NestedSetParent-71]
+	_ = x[ID-72]
+	_ = x[TraceID-73]
+	_ = x[SpanID-74]
+	_ = x[ParentID-75]
+	_ = x[TimeSinceStart-76]
+	_ = x[Version-77]
+	_ = x[Ance-78]
+	_ = x[NotChild-79]
+	_ = x[NotParent-80]
+	_ = x[NotDesc-81]
+	_ = x[NotAnce-82]
+	_ = x[UnionChild-83]
+	_ = x[UnionParent-84]
+	_ = x[UnionDesc-85]
+	_ = x[UnionAnce-86]
+	_ = x[UnionSibling-87]
+	_ = x[Rate-88]
+	_ = x[CountOverTime-89]
+	_ = x[MinOverTime-90]
+	_ = x[MaxOverTime-91]
+	_ = x[SumOverTime-92]
+	_ = x[AvgOverTime-93]
+	_ = x[QuantileOverTime-94]
+	_ = x[HistogramOverTime-95]
+	_ = x[TopK-96]
+	_ = x[BottomK-97]
+	_ = x[Compare-98]
 }
 
-const _TokenType_name = "InvalidEOFIdentStringIntegerNumberDurationCommaDotOpenBraceCloseBraceOpenParenCloseParenEqNotEqReNotReGtGteLtLteAddSubDivModMulPowTrueFalseNilStatusOkStatusErrorStatusUnsetKindUnspecifiedKindInternalKindServerKindClientKindProducerKindConsumerAndOrNotPipeDescTildeSpanDurationChildCountNameStatusKindRootNameRootServiceNameTraceDurationParentCountAvgMaxMinSumByCoalesceSelect"
+const _TokenType_name = "InvalidEOFIdentStringIntegerNumberDurationCommaDotOpenBraceCloseBraceOpenParenCloseParenEqNotEqReNotReGtGteLtLteAddSubDivModMulPowTrueFalseNilStatusOkStatusErrorStatusUnsetKindUnspecifiedKindInternalKindServerKindClientKindProducerKindConsumerAndOrNotPipeDescTildeSpanDurationChildCountNameStatusKindRootNameRootServiceNameTraceDurationParentCountAvgMaxMinSumByCoalesceSelectTraceColonSpanColonEventColonLinkColonInstrumentationColonStatusMessageRootServiceNestedSetLeftNestedSetRightNestedSetParentIDTraceIDSpanIDParentIDTimeSinceStartVersionAnceNotChildNotParentNotDescNotAnceUnionChildUnionParentUnionDescUnionAnceUnionSiblingRateCountOverTimeMinOverTimeMaxOverTimeSumOverTimeAvgOverTimeQuantileOverTimeHistogramOverTimeTopKBottomKCompare"
 
-var _TokenType_index = [...]uint16{0, 7, 10, 15, 21, 28, 34, 42, 47, 50, 59, 69, 78, 88, 90, 95, 97, 102, 104, 107, 109, 112, 115, 118, 121, 124, 127, 130, 134, 139, 142, 150, 161, 172, 187, 199, 209, 219, 231, 243, 246, 248, 251, 255, 259, 264, 276, 286, 290, 296, 300, 308, 323, 336, 342, 347, 350, 353, 356, 359, 361, 369, 375}
+var _TokenType_index = [...]uint16{0, 7, 10, 15, 21, 28, 34, 42, 47, 50, 59, 69, 78, 88, 90, 95, 97, 102, 104, 107, 109, 112, 115, 118, 121, 124, 127, 130, 134, 139, 142, 150, 161, 172, 187, 199, 209, 219, 231, 243, 246, 248, 251, 255, 259, 264, 276, 286, 290, 296, 300, 308, 323, 336, 342, 347, 350, 353, 356, 359, 361, 369, 375, 385, 394, 404, 413, 433, 446, 457, 470, 484, 499, 501, 508, 514, 522, 536, 543, 547, 555, 564, 571, 578, 588, 599, 608, 617, 629, 633, 646, 657, 668, 679, 690, 706, 723, 727, 734, 741}
 
 func (i TokenType) String() string {
-	if i < 0 || i >= TokenType(len(_TokenType_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_TokenType_index)-1 {
 		return "TokenType(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _TokenType_name[_TokenType_index[i]:_TokenType_index[i+1]]
+	return _TokenType_name[_TokenType_index[idx]:_TokenType_index[idx+1]]
 }

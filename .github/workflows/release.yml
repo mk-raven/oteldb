@@ -20,22 +20,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # https://goreleaser.com/ci/actions/
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - run: git fetch --force --tags
 
-      - uses: sigstore/cosign-installer@v3.10.0
+      - uses: sigstore/cosign-installer@v4.1.2
       - uses: anchore/sbom-action/download-syft@v0
       - run: sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Install Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: stable
           cache: false
+
+      # Bun builds the admin panel SPA via the goreleaser `before` hook, so the
+      # embedded frontend (internal/adminhandler/frontend/dist) is rebuilt fresh.
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - name: Get Go environment
         id: go-env
@@ -45,7 +52,7 @@ jobs:
           echo "goversion=$(go env GOVERSION)" >> $GITHUB_ENV
 
       - name: Set up cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ env.cache }}
@@ -54,7 +61,7 @@ jobs:
           restore-keys: |
             release-${{ runner.os }}-go-${{ env.goversion }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         name: Releaser cache
         with:
           path: |
@@ -65,14 +72,14 @@ jobs:
 
       - name: ghcr-login
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: goreleaser-install
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           install-only: true
 

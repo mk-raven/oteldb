@@ -3,17 +3,18 @@ package chstorage
 import (
 	"context"
 
-	"github.com/ClickHouse/ch-go"
 	"github.com/go-faster/errors"
-	"github.com/go-faster/sdk/zctx"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/go-faster/oteldb/internal/traceql"
-	"github.com/go-faster/oteldb/internal/tracestorage"
-	"github.com/go-faster/oteldb/internal/xsync"
+	"github.com/oteldb/oteldb/internal/globalmetric"
+	"github.com/oteldb/oteldb/internal/semconv"
+	"github.com/oteldb/oteldb/internal/traceql"
+	"github.com/oteldb/oteldb/internal/tracestorage"
+	"github.com/oteldb/oteldb/internal/xspan"
+	"github.com/oteldb/oteldb/internal/xsync"
 )
 
 type spanWriter struct {
@@ -66,45 +67,44 @@ func (i *Inserter) submitTraces(
 	ctx, span := i.tracer.Start(ctx, "chstorage.traces.submitTraces", trace.WithAttributes(
 		attribute.Int("chstorage.spans_count", spans.spanID.Rows()),
 	))
+
 	defer func() {
 		if rerr != nil {
-			span.RecordError(rerr)
+			xspan.Fail(span, rerr)
 		} else {
-			i.stats.InsertedSpans.Add(ctx, int64(spans.spanID.Rows()))
-			i.stats.InsertedTags.Add(ctx, int64(attrs.name.Rows()))
-
 			i.stats.Inserts.Add(ctx, 1,
-				metric.WithAttributes(
-					attribute.String("chstorage.signal", "traces"),
-				),
+				metric.WithAttributes(semconv.Signal(semconv.SignalTraces)),
 			)
 		}
 		span.End()
 	}()
 
+	ctx, track := i.tracker.Start(ctx, globalmetric.WithAttributes(
+		semconv.Signal(semconv.SignalTraces),
+	))
+	defer track.End()
+
 	grp, grpCtx := errgroup.WithContext(ctx)
 	grp.Go(func() error {
 		ctx := grpCtx
 
-		if err := i.ch.Do(ctx, ch.Query{
-			Logger: zctx.From(ctx).Named("ch"),
-			Body:   spans.Body(i.tables.Spans),
-			Input:  spans.Input(),
-		}); err != nil {
+		table := i.tables.Spans
+		if err := i.do(ctx, semconv.SignalTraces, table, spans.Body(table), spans.Input()); err != nil {
 			return errors.Wrap(err, "insert spans")
 		}
+		i.stats.InsertedSpans.Add(ctx, int64(spans.spanID.Rows()))
+
 		return nil
 	})
 	grp.Go(func() error {
 		ctx := grpCtx
 
-		if err := i.ch.Do(ctx, ch.Query{
-			Logger: zctx.From(ctx).Named("ch"),
-			Body:   attrs.Body(i.tables.Tags),
-			Input:  attrs.Input(),
-		}); err != nil {
+		table := i.tables.Tags
+		if err := i.do(ctx, semconv.SignalTraces, table, attrs.Body(table), attrs.Input()); err != nil {
 			return errors.Wrap(err, "insert tags")
 		}
+		i.stats.InsertedTags.Add(ctx, int64(attrs.name.Rows()))
+
 		return nil
 	})
 	return grp.Wait()

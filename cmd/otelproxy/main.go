@@ -14,15 +14,15 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/go-faster/oteldb/internal/httpmiddleware"
-	"github.com/go-faster/oteldb/internal/lokiapi"
-	"github.com/go-faster/oteldb/internal/lokiproxy"
-	"github.com/go-faster/oteldb/internal/promapi"
-	"github.com/go-faster/oteldb/internal/promproxy"
-	"github.com/go-faster/oteldb/internal/pyroproxy"
-	"github.com/go-faster/oteldb/internal/pyroscopeapi"
-	"github.com/go-faster/oteldb/internal/tempoapi"
-	"github.com/go-faster/oteldb/internal/tempoproxy"
+	"github.com/oteldb/oteldb/internal/httpmiddleware"
+	"github.com/oteldb/oteldb/internal/lokiapi"
+	"github.com/oteldb/oteldb/internal/lokiproxy"
+	"github.com/oteldb/oteldb/internal/promapi"
+	"github.com/oteldb/oteldb/internal/promproxy"
+	"github.com/oteldb/oteldb/internal/pyroproxy"
+	"github.com/oteldb/oteldb/internal/pyroscopeapi"
+	"github.com/oteldb/oteldb/internal/tempoapi"
+	"github.com/oteldb/oteldb/internal/tempoproxy"
 )
 
 type service struct {
@@ -77,7 +77,7 @@ func (s service) Run(ctx context.Context, lg *zap.Logger, m *app.Telemetry) erro
 func ServiceMiddleware(s service, lg *zap.Logger, m *app.Telemetry) http.Handler {
 	return httpmiddleware.Wrap(s.handler,
 		httpmiddleware.InjectLogger(lg),
-		httpmiddleware.Instrument(s.name, s.findRoute, m),
+		httpmiddleware.Instrument(s.addr, s.name, s.findRoute, m),
 		httpmiddleware.LogRequests(s.findRoute),
 	)
 }
@@ -121,7 +121,7 @@ func (s *services) Prometheus(m *app.Telemetry) error {
 		cleanup func() error
 	)
 	if fName := os.Getenv(prefix + "_RECORD"); fName != "" {
-		// #nosec G304 G302
+		// #nosec G304 G302 G703
 		f, err := os.OpenFile(fName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)
 		if err != nil {
 			return errors.Wrap(err, "create record file")
@@ -310,7 +310,6 @@ func main() {
 		}
 		g, ctx := errgroup.WithContext(ctx)
 		for _, s := range s.ports {
-			s := s
 			lg := lg.Named(s.name)
 			g.Go(func() error {
 				return s.Run(ctx, lg, m)

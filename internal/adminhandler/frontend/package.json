@@ -1,0 +1,36 @@
+{
+  "name": "@oteldb/admin-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "oteldb admin panel — full-featured web UI with an Orval-generated typed API client.",
+  "scripts": {
+    "gen": "orval --config ./orval.config.ts",
+    "dev": "vite",
+    "build": "orval --config ./orval.config.ts && tsc -b && vite build",
+    "build:only": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "fmt": "biome format --write .",
+    "lint": "biome check ."
+  },
+  "dependencies": {
+    "@gravity-ui/charts": "^1.57.1",
+    "@gravity-ui/icons": "^2.21.0",
+    "@gravity-ui/navigation": "^6.3.1",
+    "@gravity-ui/uikit": "^7.47.1",
+    "@tanstack/react-query": "^5.62.7",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.1.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.8",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "orval": "^7.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}

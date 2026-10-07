@@ -10,9 +10,10 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/lokiapi"
-	"github.com/go-faster/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/lokiapi"
+	"github.com/oteldb/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/xspan"
 )
 
 // LogQuery represents a log query.
@@ -73,10 +74,7 @@ func (q *LogQuery) eval(ctx context.Context, params EvalParams) (data lokiapi.St
 	))
 	defer func() {
 		q.stats.QueryDuration.Record(ctx, time.Since(start).Seconds())
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	iter, err := q.Root.EvalPipeline(ctx, params)
@@ -187,9 +185,15 @@ func (n *ProcessorNode) EvalPipeline(ctx context.Context, params EvalParams) (_ 
 		return nil, errors.Wrap(err, "build pipeline")
 	}
 
-	// Do not limit storage query.
+	// Limit the storage query only when nothing below can drop an entry: then the storage top-N and
+	// the final top-N agree. A stage that may drop (a filter) or a non-nop prefilter breaks the
+	// agreement — fetching only N would under-report — so the storage query stays unlimited and
+	// [entryIterator] applies the limit after the pipeline. The [entryIterator] limit stays in place
+	// either way; it is the backstop.
 	qparams := params
-	qparams.Limit = -1
+	if !n.keepsEveryEntry() {
+		qparams.Limit = -1
+	}
 	iter, err := n.Input.EvalPipeline(ctx, qparams)
 	if err != nil {
 		return nil, err

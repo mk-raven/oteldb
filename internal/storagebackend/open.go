@@ -1,0 +1,406 @@
+package storagebackend
+
+import (
+	"cmp"
+	"context"
+	"io/fs"
+	"math"
+	"net"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"strconv"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/go-faster/errors"
+	"github.com/go-faster/sdk/app"
+	gopsmem "github.com/shirou/gopsutil/v4/mem"
+	"go.uber.org/zap"
+
+	"github.com/oteldb/storage"
+	"github.com/oteldb/storage/backend"
+	backendfile "github.com/oteldb/storage/backend/file"
+	backends3 "github.com/oteldb/storage/backend/s3"
+	"github.com/oteldb/storage/cluster"
+	"github.com/oteldb/storage/cluster/etcd"
+	"github.com/oteldb/storage/reliability"
+
+	"github.com/oteldb/oteldb/internal/xbytes"
+)
+
+// Open constructs the embedded storage engine and an adapter implementing
+// oteldb's metric query and ingestion interfaces. The returned close func stops and flushes
+// the engine. It is used when [Config.MetricsBackend] is [MetricsBackendStorage].
+func Open(ctx context.Context, cfg Config, lg *zap.Logger, m *app.Telemetry) (*Backend, func(context.Context) error, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, nil, errors.Wrap(err, "storage")
+	}
+
+	layout, err := cfg.Layout()
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "resolve storage layout")
+	}
+
+	// The engine logs, traces, and meters through the injected providers (no-op if absent).
+	opts := []storage.Option{
+		storage.WithLogger(lg),
+		storage.WithTracerProvider(m.TracerProvider()),
+		storage.WithMeterProvider(m.MeterProvider()),
+	}
+	switch cfg.Backend {
+	case "", "memory":
+		opts = append(opts,
+			storage.WithBackend(backend.Memory()),
+			storage.WithDurability(storage.DurabilityEphemeral),
+		)
+	case "file":
+		fb, err := backendfile.New(layout.Parts)
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "open file backend")
+		}
+		opts = append(opts, storage.WithBackend(fb))
+	case "s3":
+		sb, err := s3Backend(ctx, cfg.S3)
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "open s3 backend")
+		}
+		opts = append(opts, storage.WithBackend(sb))
+	}
+	if layout.WAL != "" {
+		if cfg.ReadOnly {
+			warnUnflushedWAL(layout.WAL, lg)
+		} else {
+			opts = append(opts, storage.WithWALDir(layout.WAL))
+		}
+	}
+	if cfg.FlushInterval > 0 && cfg.Backend != "" && cfg.Backend != "memory" {
+		opts = append(opts, storage.WithFlushInterval(int64(cfg.FlushInterval)))
+	}
+
+	if cfg.ReadOnly {
+		// A durable store with no explicit interval flushes periodically by default, and the loop
+		// that does it also merges parts and applies retention. A negative interval opts out, which
+		// is what read-only means here: the engine only reads.
+		opts = append(opts, storage.WithFlushInterval(-1))
+		if cfg.Cluster != nil && len(cfg.Cluster.Etcd) > 0 {
+			lg.Warn("Not joining the storage cluster: the engine is open read-only, " +
+				"so it serves only the data this node holds locally")
+			cfg.Cluster = nil
+		}
+	}
+
+	if clusterOpt, err := clusterOption(cfg.Cluster, lg); err != nil {
+		return nil, nil, err
+	} else if clusterOpt != nil {
+		opts = append(opts, clusterOpt)
+	}
+
+	if tenancyOpt, err := tenancyOption(cfg.Policy); err != nil {
+		return nil, nil, errors.Wrap(err, "storage policy")
+	} else if tenancyOpt != nil {
+		opts = append(opts, tenancyOpt)
+		lg.Info("Applying embedded storage tenancy policy",
+			zap.Int("precision_tiers", len(cfg.Policy.Precision)),
+			zap.Int("downsample_tiers", len(cfg.Policy.Downsample)),
+			zap.Bool("recompress", cfg.Policy.Recompress != nil),
+			zap.Bool("ec", cfg.Policy.EC != nil),
+			zap.Duration("retention_max_age", retentionMaxAge(cfg.Policy.Retention)),
+			zap.Int("retention_signal_budgets", retentionSignalBudgets(cfg.Policy.Retention)),
+			zap.Bool("limits", cfg.Policy.Limits != nil),
+		)
+		warnECInert(cfg.Cluster, cfg.Policy, lg)
+	}
+
+	caches := resolveCacheSettings(cfg)
+	opts = append(opts, cacheOptions(caches)...)
+
+	store, err := storage.Open(ctx, storage.Options{MaxQueryBytes: caches.MaxQuery}, opts...)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "open storage")
+	}
+
+	lg.Info("Using embedded storage engine for metrics",
+		zap.String("backend", cmp.Or(cfg.Backend, "memory")),
+		zap.String("parts_dir", layout.Parts),
+		zap.String("wal_dir", layout.WAL),
+		zap.Bool("read_only", cfg.ReadOnly),
+		zap.Int("log_query_parallelism", cfg.LogQueryParallelism),
+		zap.Int64("read_cache_bytes", caches.ReadCache),
+		zap.Int64("decode_cache_bytes", caches.DecodeCache),
+		zap.Int64("decode_memory_bytes", caches.DecodeMemory),
+		zap.Int64("merge_memory_bytes", caches.MergeMemory),
+		zap.Bool("aggregate_stats", caches.AggregateStats),
+	)
+	b := New(store,
+		WithLogParallelism(cfg.LogQueryParallelism),
+		WithMeterProvider(m.MeterProvider()),
+	)
+	return b, store.Close, nil
+}
+
+// warnUnflushedWAL reports the one thing a read-only open gives up: whatever the engine has
+// ingested but not yet flushed lives in the WAL, and replaying it is a write — it re-attaches a
+// writable WAL, and the close that follows flushes the recovered head into a new part and
+// checkpoints the segments away, out from under the node that owns them. So a read-only open skips
+// it, and reads the flushed parts only.
+func warnUnflushedWAL(dir string, lg *zap.Logger) {
+	if !hasFiles(dir) {
+		return
+	}
+	lg.Warn("Read-only engine: the write-ahead log is not replayed, so unflushed data is not visible",
+		zap.String("wal_dir", dir),
+	)
+}
+
+// hasFiles reports whether dir holds any regular file, at any depth. An unreadable or absent tree
+// answers false: this only decides whether to warn.
+func hasFiles(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return nil
+		case d.IsDir():
+			return nil
+		}
+		found = true
+		return fs.SkipAll
+	})
+	return found
+}
+
+// clusterOption builds the storage cluster option from the config, or returns (nil, nil) when
+// clustering is not configured (no etcd endpoints). The node identity and replication address
+// default to the OS hostname, so every node in a deployment can share one config file.
+func clusterOption(cfg *ClusterConfig, lg *zap.Logger) (storage.Option, error) {
+	if cfg == nil || len(cfg.Etcd) == 0 {
+		return nil, nil
+	}
+
+	id := cfg.ID
+	if id == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			return nil, errors.Wrap(err, "resolve hostname for cluster id")
+		}
+		id = host
+	}
+
+	addr := cfg.Addr
+	if addr == "" {
+		port := cfg.Port
+		if port == 0 {
+			port = 7946
+		}
+		addr = net.JoinHostPort(id, strconv.Itoa(port))
+	}
+
+	lg.Info("Joining storage cluster",
+		zap.Strings("etcd", cfg.Etcd),
+		zap.String("id", id),
+		zap.String("zone", cfg.Zone),
+		zap.String("addr", addr),
+		zap.Int("rf", cfg.RF),
+		zap.Int("shards_per_tenant", cfg.ShardsPerTenant),
+		zap.Bool("private_backend", cfg.PrivateBackend),
+	)
+	return storage.WithCluster(&cluster.Config{
+		Etcd:            cfg.Etcd,
+		Self:            etcd.Member{ID: id, Zone: cfg.Zone, Addr: addr},
+		RF:              cfg.RF,
+		ShardsPerTenant: cfg.ShardsPerTenant,
+		Root:            cfg.Root,
+		PrivateBackend:  cfg.PrivateBackend,
+	}), nil
+}
+
+// s3Backend builds the embedded storage engine's S3 object-store backend from the config. It uses
+// static credentials when both keys are set, otherwise the default AWS credential chain
+// (environment, shared config, IAM role), and applies the requested resilience profile.
+func s3Backend(ctx context.Context, cfg *S3Config) (backend.Backend, error) {
+	if cfg == nil || cfg.Bucket == "" {
+		return nil, errors.New("storage.s3.bucket is required for the s3 backend")
+	}
+
+	o := awss3.Options{
+		Region:       cfg.Region,
+		UsePathStyle: cfg.ForcePathStyle,
+	}
+	if cfg.Endpoint != "" {
+		o.BaseEndpoint = aws.String(cfg.Endpoint)
+	}
+	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
+		o.Credentials = credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken)
+	} else {
+		// Fall back to the default chain (env, shared config, IAM role); resolved lazily on first use.
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return nil, errors.Wrap(err, "load aws config")
+		}
+		o.Credentials = awsCfg.Credentials
+		if o.Region == "" {
+			o.Region = awsCfg.Region
+		}
+	}
+
+	var s3Opts []backends3.Option
+	switch cfg.Retry {
+	case "", "none":
+		// No extra resilience layer; the AWS SDK's own retryer still applies.
+	case "default":
+		s3Opts = append(s3Opts, backends3.WithRetry(reliability.Default()))
+	case "lossy":
+		s3Opts = append(s3Opts, backends3.WithRetry(reliability.LossyEnvironment()))
+	default:
+		return nil, errors.Errorf("unknown s3 retry profile %q", cfg.Retry)
+	}
+
+	store := backends3.NewAWS(awss3.New(o), cfg.Bucket)
+	return backends3.New(store, cfg.Prefix, s3Opts...), nil
+}
+
+// cacheSettings is the resolved, effective cache/optimization configuration that oteldb applies to
+// the storage engine. Unlike the storage library (where these are opt-in), oteldb enables all three
+// by default and treats them as opt-out.
+type cacheSettings struct {
+	ReadCache      int64
+	DecodeCache    int64
+	DecodeMemory   int64
+	MergeMemory    int64
+	MaxQuery       int64
+	AggregateStats bool
+}
+
+// resolveCacheSettings resolves the cache/optimization settings from config. Unset fields are sized
+// from the Go memory limit (e.g. a cgroup limit applied by automemlimit), falling back to
+// conservative absolute defaults when no limit is detectable. An explicit zero byte size disables
+// that cache, and an explicit AggregateStats=false disables the sidecar.
+func resolveCacheSettings(cfg Config) cacheSettings {
+	s := cacheSettings{
+		ReadCache:      resolveCacheBytes(cfg.ReadCacheBytes, defaultReadCacheBytes),
+		DecodeCache:    resolveCacheBytes(cfg.DecodeCacheBytes, defaultDecodeCacheBytes),
+		AggregateStats: cfg.AggregateStats == nil || *cfg.AggregateStats,
+	}
+	// The decode-memory default fits around the caches, so it must resolve after them (an explicit
+	// cache size shrinks or grows the remaining budget accordingly).
+	s.DecodeMemory = resolveCacheBytes(cfg.DecodeMemoryBytes, func() int64 {
+		return defaultDecodeMemoryBytes(s.ReadCache, s.DecodeCache)
+	})
+	// Merge memory has no oteldb-side default: unset stays 0, which the library resolves from the
+	// same memory limit this file's defaults are derived from.
+	s.MergeMemory = resolveCacheBytes(cfg.MergeMemoryBytes, func() int64 { return 0 })
+	// The per-query read bound inverts the polarity the library uses, to match the caches above:
+	// unset means "let the library size it from the memory limit" (0), and an explicit 0 means
+	// "disable", which the library spells as a negative.
+	s.MaxQuery = resolveCacheBytes(cfg.MaxQueryBytes, func() int64 { return 0 })
+	if cfg.MaxQueryBytes != nil && s.MaxQuery == 0 {
+		s.MaxQuery = -1
+	}
+	return s
+}
+
+// cacheOptions builds the storage options for the resolved cache/optimization settings.
+func cacheOptions(s cacheSettings) []storage.Option {
+	opts := []storage.Option{
+		storage.WithReadCache(s.ReadCache),
+		storage.WithDecodeCache(s.DecodeCache),
+		storage.WithDecodeMemory(s.DecodeMemory),
+	}
+	if s.MergeMemory != 0 {
+		opts = append(opts, storage.WithMergeMemory(s.MergeMemory))
+	}
+	if s.AggregateStats {
+		opts = append(opts, storage.WithAggregateStats())
+	}
+	return opts
+}
+
+// resolveCacheBytes returns an explicit configured byte size (including 0 to disable) or, when
+// unset, the default returned by def.
+func resolveCacheBytes(cfg *xbytes.Bytes, def func() int64) int64 {
+	if cfg != nil {
+		return int64(*cfg)
+	}
+	return def()
+}
+
+// defaultReadCacheBytes sizes the backend object read cache (~1/16 of RAM, floor 128 MiB).
+func defaultReadCacheBytes() int64 { return defaultCacheBytes(1.0/16, 128<<20) }
+
+// defaultDecodeCacheBytes sizes the decoded-column cache as ~1/32 of detected memory, floored at
+// 64 MiB and capped at 512 MiB. A decoded part is ~11-16 MiB and a typical query window touches
+// ~12-30 live parts (full-namespace scans touch every part), so too small a cache thrashes to a
+// ~100% miss rate and re-decodes on every fetch (a 64 MiB cache held only ~4 parts); 512 MiB covers
+// the working set. Unlike a flat floor this stays RSS-safe: a small box gets ~64 MiB rather than an
+// unconditional 512 MiB, while a large box is capped at the 512 MiB ceiling. See oteldb#1112.
+func defaultDecodeCacheBytes() int64 { return budgetedCacheBytes(1.0/32, 64<<20, 512<<20) }
+
+// defaultDecodeMemoryBytes fits the engine's decode-admission budget to the process memory budget,
+// so query concurrency cannot drive the live heap past GOMEMLIMIT (past the limit the Go pacer runs
+// GC back-to-back and every in-flight query pays continuous mark cost; see oteldb#1124). Half the
+// detected budget is headroom for everything the budget does not meter — the resident baseline
+// (head, WAL, ingest) and per-query eval transients (coalesce/output buffers) — and the caches are
+// subtracted from the metered half since they are sized separately and are just as resident:
+//
+//	decodeMemory = detected/2 − readCache − decodeCache
+//
+// Floored at 64 MiB so a small box still admits a query at a time instead of degenerating (a query
+// larger than the whole budget is admitted alone, so the floor never rejects anything). When no
+// memory is detectable it returns 0 (admission control off), matching the library default.
+func defaultDecodeMemoryBytes(readCache, decodeCache int64) int64 {
+	basis := detectMemoryBytes()
+	if basis <= 0 {
+		return 0
+	}
+	return max(basis/2-readCache-decodeCache, 64<<20)
+}
+
+// defaultCacheBytes sizes a cache as the given fraction of the Go memory limit, floored at minBytes.
+// When no limit is set (the default of math.MaxInt64, meaning unbounded), it returns minBytes so the
+// cache gets a sane absolute size rather than a RAM-proportional blow-up.
+func defaultCacheBytes(fraction float64, minBytes int64) int64 {
+	limit := debug.SetMemoryLimit(-1)
+	if limit <= 0 || limit == math.MaxInt64 {
+		return minBytes
+	}
+	if v := int64(float64(limit) * fraction); v > minBytes {
+		return v
+	}
+	return minBytes
+}
+
+// budgetedCacheBytes sizes a cache as a fraction of detected memory, clamped to [minBytes, maxBytes].
+// Unlike defaultCacheBytes it does not collapse to the floor when GOMEMLIMIT is unset: it sizes off
+// the detected host/cgroup memory (detectMemoryBytes), so the cache stays proportional to the box —
+// a small host gets minBytes, a large host is capped at maxBytes — instead of an unconditional floor
+// that ignores how much RAM is actually available. Keeps RSS bounded on both ends. See oteldb#1112.
+func budgetedCacheBytes(fraction float64, minBytes, maxBytes int64) int64 {
+	basis := detectMemoryBytes()
+	if basis <= 0 {
+		return minBytes
+	}
+	v := int64(float64(basis) * fraction)
+	if v < minBytes {
+		return minBytes
+	}
+	if v > maxBytes {
+		return maxBytes
+	}
+	return v
+}
+
+// detectMemoryBytes returns the memory budget to size caches against: the Go memory limit when one
+// is set (GOMEMLIMIT, or a cgroup limit applied by automemlimit at startup), otherwise the detected
+// host/cgroup total memory. Returns 0 when memory cannot be detected, so callers fall back to a floor.
+func detectMemoryBytes() int64 {
+	if limit := debug.SetMemoryLimit(-1); limit > 0 && limit != math.MaxInt64 {
+		return limit
+	}
+	if vm, err := gopsmem.VirtualMemory(); err == nil && vm != nil && vm.Total > 0 && vm.Total <= math.MaxInt64 {
+		return int64(vm.Total)
+	}
+	return 0
+}

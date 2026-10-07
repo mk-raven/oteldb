@@ -3,9 +3,11 @@ package httpmiddleware
 
 import (
 	"net/http"
+	"slices"
 
 	"github.com/go-faster/sdk/zctx"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -60,14 +62,52 @@ type Metrics interface {
 }
 
 // Instrument setups otelhttp.
-func Instrument(serviceName string, find RouteFinder, m Metrics) Middleware {
+func Instrument(endpoint, serviceName string, find RouteFinder, m Metrics) Middleware {
+	addLabeler := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			l, ok := otelhttp.LabelerFromContext(ctx)
+			if !ok {
+				ctx = otelhttp.ContextWithLabeler(ctx, l)
+			}
+			r = r.WithContext(ctx)
+
+			route, ok := find(r.Method, r.URL)
+			if !ok {
+				l.Add(
+					attribute.String("oas.operation.id", "<unknown>"),
+					attribute.String("oteldb.api", serviceName),
+				)
+			} else {
+				l.Add(
+					attribute.String("oas.route.name", route.Name()),
+					attribute.String("oas.operation.id", route.OperationID()),
+					attribute.String("oteldb.api", serviceName),
+				)
+			}
+
+			h.ServeHTTP(w, r)
+		})
+	}
+	captureHTTPAttrs := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			span := trace.SpanFromContext(r.Context())
+			if v := r.Header.Get("Accept"); v != "" {
+				span.SetAttributes(attribute.String("http.request.header.accept", v))
+			}
+			next.ServeHTTP(w, r)
+			if ct := w.Header().Get("Content-Type"); ct != "" {
+				span.SetAttributes(attribute.String("http.response.header.content_type", ct))
+			}
+		})
+	}
 	return func(h http.Handler) http.Handler {
-		return otelhttp.NewHandler(h, "",
+		h = otelhttp.NewHandler(captureHTTPAttrs(h), "",
 			otelhttp.WithPropagators(m.TextMapPropagator()),
 			otelhttp.WithTracerProvider(m.TracerProvider()),
 			otelhttp.WithMeterProvider(m.MeterProvider()),
 			otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
-			otelhttp.WithServerName(serviceName),
+			otelhttp.WithServerName(endpoint),
 			otelhttp.WithSpanNameFormatter(func(operation string, r *http.Request) string {
 				op, ok := find(r.Method, r.URL)
 				if ok {
@@ -76,6 +116,7 @@ func Instrument(serviceName string, find RouteFinder, m Metrics) Middleware {
 				return operation
 			}),
 		)
+		return addLabeler(h)
 	}
 }
 
@@ -87,8 +128,8 @@ func Wrap(h http.Handler, middlewares ...Middleware) http.Handler {
 	case 1:
 		return middlewares[0](h)
 	default:
-		for i := len(middlewares) - 1; i >= 0; i-- {
-			h = middlewares[i](h)
+		for _, v := range slices.Backward(middlewares) {
+			h = v(h)
 		}
 		return h
 	}

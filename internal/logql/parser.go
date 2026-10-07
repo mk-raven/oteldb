@@ -1,14 +1,16 @@
 package logql
 
 import (
+	"fmt"
+	"iter"
 	"strconv"
 	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/go-faster/errors"
 
-	"github.com/go-faster/oteldb/internal/lexerql"
-	"github.com/go-faster/oteldb/internal/logql/lexer"
+	"github.com/oteldb/oteldb/internal/lexerql"
+	"github.com/oteldb/oteldb/internal/logql/lexer"
 )
 
 // ParseOptions is LogQL parser options.
@@ -36,6 +38,47 @@ func Parse(s string, opts ParseOptions) (Expr, error) {
 		return nil, p.tailToken(t)
 	}
 	return expr, nil
+}
+
+// ExtractSelectors returns the selectors extracted from the given expression.
+func ExtractSelectors(s string, opts ParseOptions) (iter.Seq[Selector], error) {
+	expr, err := Parse(s, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	seq := func(yield func(Selector) bool) {
+		var walk func(Expr) bool
+		walk = func(e Expr) bool {
+			switch e := e.(type) {
+			case *ParenExpr:
+				return walk(e.X)
+			case *ExplainExpr:
+				return walk(e.X)
+			case *LogExpr:
+				return yield(e.Sel)
+			case *RangeAggregationExpr:
+				return yield(e.Range.Sel)
+			case *VectorAggregationExpr:
+				return walk(e.Expr)
+			case *LiteralExpr:
+				return true
+			case *LabelReplaceExpr:
+				return walk(e.Expr)
+			case *VectorExpr:
+				return true
+			case *BinOpExpr:
+				if !walk(e.Left) {
+					return false
+				}
+				return walk(e.Right)
+			default:
+				panic(fmt.Sprintf("unexpected type %T", e))
+			}
+		}
+		walk(expr)
+	}
+	return seq, nil
 }
 
 // ParseSelector parses label selector from string.

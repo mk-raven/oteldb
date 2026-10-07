@@ -5,7 +5,9 @@ volumes:
 
 services:
   clickhouse:
-    image: "ghcr.io/go-faster/clickhouse-server:23.12"
+    image: "clickhouse/clickhouse-server:25.9"
+    environment:
+      - CLICKHOUSE_PASSWORD=default
     ports:
       - "9000:9000"
       - "8123:8123"
@@ -19,12 +21,16 @@ services:
 
   # Exports traces from clickhouse internal table to otel.
   chotel:
-    image: ghcr.io/go-faster/oteldb/chotel
+    image: ghcr.io/oteldb/oteldb/chotel
     build:
       context: ../../../
-      dockerfile: chotel.Dockerfile
+      dockerfile: dev/Dockerfile
+      args:
+        TARGETS: chotel
+        ENTRYPOINT_BIN: chotel
     restart: always
     environment:
+      - CH_DSN=clickhouse://default:default@clickhouse:9000
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       - OTEL_EXPORTER_OTLP_INSECURE=true
@@ -33,13 +39,13 @@ services:
       - clickhouse
 
   oteldb:
-    image: ghcr.io/go-faster/oteldb
+    image: ghcr.io/oteldb/oteldb
     build:
       context: ../../../
-      dockerfile: Dockerfile
+      dockerfile: dev/Dockerfile
     environment:
       - OTELDB_STORAGE=ch
-      - CH_DSN=clickhouse://clickhouse:9000
+      - CH_DSN=clickhouse://default:default@clickhouse:9000
       - OTEL_LOG_LEVEL=debug
       - OTEL_METRICS_EXPORTER=otlp
       - OTEL_LOGS_EXPORTER=otlp
@@ -113,10 +119,13 @@ services:
 
   # demo client
   client:
-    image: ghcr.io/go-faster/oteldb/oteldemo
+    image: ghcr.io/oteldb/oteldb/oteldemo
     build:
       context: ../../../
-      dockerfile: oteldemo.Dockerfile
+      dockerfile: dev/Dockerfile
+      args:
+        TARGETS: oteldemo
+        ENTRYPOINT_BIN: oteldemo
     restart: always
     command: ["client"]
     environment:
@@ -130,11 +139,14 @@ services:
       - OTEL_RESOURCE_ATTRIBUTES=service.name=client
   # demo server
   server:
-    image: ghcr.io/go-faster/oteldb/oteldemo
+    image: ghcr.io/oteldb/oteldb/oteldemo
     command: ["server"]
     build:
       context: ../../../
-      dockerfile: oteldemo.Dockerfile
+      dockerfile: dev/Dockerfile
+      args:
+        TARGETS: oteldemo
+        ENTRYPOINT_BIN: oteldemo
     restart: always
     environment:
       - OTEL_LOG_LEVEL=debug

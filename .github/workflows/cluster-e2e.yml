@@ -1,0 +1,103 @@
+name: "Cluster E2E"
+
+# End-to-end test for the storage-engine cluster (dev/local/storage-cluster): three oteldb nodes
+# replicating over an etcd ring. A metric, a log, and a trace are ingested at one node via OTLP and
+# queried back through the PromQL / LogQL / TraceQL APIs of *other* nodes, so a pass proves
+# cross-node routing + replication across all three signals.
+#
+# Both storage models run, because they fail differently. shared-nothing exercises partsync
+# (flushed parts mirrored node-to-node); shared-store puts every node on one SeaweedFS bucket, where
+# the bucket index is committed by several writers through a real conditional PUT.
+#
+# The split model changes the processes rather than the storage: ingest and query move out of the
+# nodes into odbingest and odbselect, so a pass proves those two route and fan out correctly
+# instead of only the --embedded path.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Bake in binaries built on the host with a warm Go cache, instead of compiling in-container.
+  CLUSTER_DOCKERFILE: ./dev/deploy/deploy.Dockerfile
+
+jobs:
+  cluster:
+    runs-on: ubuntu-latest
+    name: ${{ matrix.model }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each node on its own disk; flushed parts mirrored over partsync.
+          - model: shared-nothing
+            compose: "-f docker-compose.yml"
+          # Every node on one SeaweedFS bucket; parts exchanged through the store, index committed
+          # with CompareAndSwap (S3 conditional PUT).
+          - model: shared-store
+            compose: "-f docker-compose.yml -f docker-compose.shared-store.yml --profile seaweedfs"
+          # Ingest and query as their own processes in front of the same three nodes.
+          - model: split
+            compose: "-f docker-compose.yml -f docker-compose.split.yml"
+            services: "oteldb-1 oteldb-2 oteldb-3 odbingest odbselect"
+            # Ingest through odbingest, query through odbselect: neither stores anything, so a
+            # result proves the whole path -- route to primary, then fan out and merge.
+            verify: "-otlp localhost:24317 -prometheus http://localhost:19090 -loki http://localhost:13100 -tempo http://localhost:13200"
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: actions/checkout@v7
+
+      - name: Get Go environment
+        run: |
+          echo "cache=$(go env GOCACHE)" >> $GITHUB_ENV
+          echo "modcache=$(go env GOMODCACHE)" >> $GITHUB_ENV
+          echo "goversion=$(go env GOVERSION)" >> $GITHUB_ENV
+
+      # Shared with the compliance jobs: same `task build-deploy`, so reuse one Go build/module cache.
+      - name: Set up cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ env.cache }}
+            ${{ env.modcache }}
+          key: compliance-${{ runner.os }}-go-${{ env.goversion }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            compliance-${{ runner.os }}-go-${{ env.goversion }}-
+
+      - name: Install Task
+        uses: go-task/setup-task@v2
+
+      - name: Build binaries
+        run: task build-deploy
+
+      - name: Start cluster
+        working-directory: dev/local/storage-cluster
+        run: docker compose ${{ matrix.compose }} up -d --build ${{ matrix.services || 'oteldb-1 oteldb-2 oteldb-3' }}
+
+      - name: Verify ingest + cross-node queries
+        run: |
+          go run ./dev/local/storage-cluster/cmd/cluster-verify \
+            ${{ matrix.verify || '-otlp localhost:14317 -prometheus http://localhost:9092 -loki http://localhost:3100 -tempo http://localhost:3200' }} \
+            -timeout 120s
+
+      - name: Dump cluster logs
+        if: failure()
+        working-directory: dev/local/storage-cluster
+        run: docker compose ${{ matrix.compose }} logs --no-color
+
+      - name: Cleanup
+        if: always()
+        working-directory: dev/local/storage-cluster
+        run: docker compose ${{ matrix.compose }} down --remove-orphans --volumes --timeout 10

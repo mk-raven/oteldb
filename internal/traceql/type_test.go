@@ -95,11 +95,16 @@ var typeTests = []struct {
 	{`{ .foo =~ .dynamic_regex }`, nil, true},
 	{`{ .foo !~ .dynamic_regex }`, nil, true},
 	{`{ .foo =~ (.dynamic_regex + 10) }`, nil, true},
+
+	// Metrics filter value must be numeric.
+	{`{} | rate() > "10"`, nil, true},
+	{`{} | rate() > nil`, nil, true},
+	{`{} | rate() > true`, nil, true},
+	{`{} | rate() > error`, nil, true},
 }
 
 func TestTypeCheck(t *testing.T) {
 	for i, tt := range typeTests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			defer func() {
 				if t.Failed() {

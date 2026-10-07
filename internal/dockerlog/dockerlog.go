@@ -7,25 +7,25 @@ import (
 	"strings"
 	"time"
 
-	apicontainer "github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
 	"github.com/go-faster/errors"
+	mobycontainer "github.com/moby/moby/api/types/container"
+	mobyclient "github.com/moby/moby/client"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/go-faster/oteldb/internal/iterators"
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine"
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/iterators"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine"
+	"github.com/oteldb/oteldb/internal/otelstorage"
 )
 
 // Querier implements LogQL querier.
 type Querier struct {
-	client client.APIClient
+	client mobyclient.APIClient
 }
 
 // NewQuerier creates new Querier.
-func NewQuerier(c client.APIClient) (*Querier, error) {
+func NewQuerier(c mobyclient.APIClient) (*Querier, error) {
 	return &Querier{
 		client: c,
 	}, nil
@@ -96,7 +96,6 @@ func (n *InputNode) EvalPipeline(ctx context.Context, params logqlengine.EvalPar
 		// As a result, openLog context would not be canceled in case of error.
 		var grp errgroup.Group
 		for idx, ctr := range containers {
-			idx, ctr := idx, ctr
 			grp.Go(func() error {
 				iter, err := n.q.openLog(ctx, ctr, params.Start, params.End)
 				if err != nil {
@@ -122,7 +121,7 @@ func (q *Querier) openLog(ctx context.Context, ctr container, start, end time.Ti
 		until = strconv.FormatInt(t.Unix(), 10)
 	}
 
-	rc, err := q.client.ContainerLogs(ctx, ctr.ID, apicontainer.LogsOptions{
+	rc, err := q.client.ContainerLogs(ctx, ctr.ID, mobyclient.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Since:      since,
@@ -137,7 +136,7 @@ func (q *Querier) openLog(ctx context.Context, ctr container, start, end time.Ti
 }
 
 func (q *Querier) fetchContainers(ctx context.Context, labels []logql.LabelMatcher) (r []container, _ error) {
-	containers, err := q.client.ContainerList(ctx, apicontainer.ListOptions{
+	result, err := q.client.ContainerList(ctx, mobyclient.ContainerListOptions{
 		All: true,
 		// TODO(tdakkota): convert select params to label matchers.
 	})
@@ -145,7 +144,7 @@ func (q *Querier) fetchContainers(ctx context.Context, labels []logql.LabelMatch
 		return nil, errors.Wrap(err, "query container list")
 	}
 
-	for _, ctr := range containers {
+	for _, ctr := range result.Items {
 		set := getLabels(ctr)
 		if set.Match(labels) {
 			r = append(r, container{
@@ -166,7 +165,7 @@ type containerLabels struct {
 	labels map[string]string
 }
 
-func getLabels(ctr apicontainer.Summary) containerLabels {
+func getLabels(ctr mobycontainer.Summary) containerLabels {
 	var name string
 	if len(ctr.Names) > 0 {
 		name = strings.TrimPrefix(ctr.Names[0], "/")
@@ -179,7 +178,7 @@ func getLabels(ctr apicontainer.Summary) containerLabels {
 		"container_image_id": ctr.ImageID,
 		"container_command":  ctr.Command,
 		"container_created":  strconv.FormatInt(ctr.Created, 10),
-		"container_state":    ctr.State,
+		"container_state":    string(ctr.State),
 		"container_status":   ctr.Status,
 	}
 	for label, value := range ctr.Labels {

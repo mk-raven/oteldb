@@ -21,14 +21,34 @@ secret.yaml
 /otelproxy
 /otelfaker
 /chotel
+/odbbackup
+/odbrestore
+/odbmigrate
+/odbagent
+/odbingest
+/odbselect
+/bin
 
 vmagent-remotewrite-data
 
 # goreleaser
 dist
+# The admin frontend's built SPA (internal/adminhandler/frontend/dist) is NOT
+# committed; it is built in CI and on release. Keep the directory (via its
+# .gitkeep placeholder) so the go:embed directive still compiles, but ignore the
+# build output itself.
+!/internal/adminhandler/frontend/dist/
+/internal/adminhandler/frontend/dist/*
+!/internal/adminhandler/frontend/dist/.gitkeep
 coverage.txt
 .task
 
 /requests.rwq
 /report.yml
 /otelbench
+
+.gemini/
+gha-creds-*.json
+
+# references
+/_ref

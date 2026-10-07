@@ -1,0 +1,164 @@
+package main
+
+import (
+	"github.com/go-faster/errors"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/connector/countconnector"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/connector/exceptionsconnector"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/connector/failoverconnector"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/connector/roundrobinconnector"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/connector/routingconnector"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/connector/servicegraphconnector"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/connector/signaltometricsconnector"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/connector/spanmetricsconnector"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/connector/sumconnector"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/fileexporter"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/kafkaexporter"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusexporter"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/basicauthextension"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/bearertokenauthextension"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/pprofextension"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/filestorage"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/attributesprocessor"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/filterprocessor"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/groupbyattrsprocessor"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/k8sattributesprocessor"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/probabilisticsamplerprocessor"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourceprocessor"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/cloudflarereceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/dockerstatsreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/filelogreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/journaldreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8seventsreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sobjectsreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kafkareceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/nginxreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/syslogreceiver"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/webhookeventreceiver"
+	"go.opentelemetry.io/collector/connector"
+	"go.opentelemetry.io/collector/exporter"
+	"go.opentelemetry.io/collector/exporter/debugexporter"
+	"go.opentelemetry.io/collector/exporter/nopexporter"
+	"go.opentelemetry.io/collector/exporter/otlpexporter"
+	"go.opentelemetry.io/collector/exporter/otlphttpexporter"
+	"go.opentelemetry.io/collector/extension"
+	"go.opentelemetry.io/collector/extension/zpagesextension"
+	"go.opentelemetry.io/collector/otelcol"
+	"go.opentelemetry.io/collector/processor"
+	"go.opentelemetry.io/collector/processor/batchprocessor"
+	"go.opentelemetry.io/collector/processor/memorylimiterprocessor"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/receiver/otlpreceiver"
+	otelconftelemetry "go.opentelemetry.io/collector/service/telemetry/otelconftelemetry"
+
+	"github.com/oteldb/oteldb/otelcolmod/chreceiver"
+	"github.com/oteldb/oteldb/otelcolmod/hareceiver"
+	"github.com/oteldb/oteldb/otelcolmod/hubblereceiver"
+	_ "github.com/oteldb/oteldb/otelcolmod/odblogparser"
+	_ "github.com/oteldb/oteldb/otelcolmod/odbsafety"
+	"github.com/oteldb/oteldb/otelcolmod/odbsafetyprocessor"
+	"github.com/oteldb/oteldb/otelcolmod/prometheusremotewritereceiver"
+	"github.com/oteldb/oteldb/otelcolmod/tetragonreceiver"
+)
+
+func components() (otelcol.Factories, error) {
+	var err error
+	factories := otelcol.Factories{
+		Telemetry: otelconftelemetry.NewFactory(),
+	}
+
+	factories.Extensions, err = otelcol.MakeFactoryMap[extension.Factory](
+		zpagesextension.NewFactory(),
+		basicauthextension.NewFactory(),
+		bearertokenauthextension.NewFactory(),
+		healthcheckextension.NewFactory(),
+		pprofextension.NewFactory(),
+		filestorage.NewFactory(),
+	)
+	if err != nil {
+		return otelcol.Factories{}, errors.Wrap(err, "make extension factory map")
+	}
+
+	factories.Receivers, err = otelcol.MakeFactoryMap[receiver.Factory](
+		otlpreceiver.NewFactory(),
+		prometheusreceiver.NewFactory(),
+		k8sclusterreceiver.NewFactory(),
+		k8seventsreceiver.NewFactory(),
+		k8sobjectsreceiver.NewFactory(),
+		kubeletstatsreceiver.NewFactory(),
+		cloudflarereceiver.NewFactory(),
+		hostmetricsreceiver.NewFactory(),
+		journaldreceiver.NewFactory(),
+		filelogreceiver.NewFactory(),
+		dockerstatsreceiver.NewFactory(),
+		nginxreceiver.NewFactory(),
+		syslogreceiver.NewFactory(),
+		kafkareceiver.NewFactory(),
+		webhookeventreceiver.NewFactory(),
+
+		prometheusremotewritereceiver.NewFactory(),
+		chreceiver.NewFactory(),
+		hareceiver.NewFactory(),
+		hubblereceiver.NewFactory(),
+		tetragonreceiver.NewFactory(),
+	)
+	if err != nil {
+		return otelcol.Factories{}, errors.Wrap(err, "make receiver factory map")
+	}
+
+	factories.Connectors, err = otelcol.MakeFactoryMap[connector.Factory](
+		countconnector.NewFactory(),
+		exceptionsconnector.NewFactory(),
+		failoverconnector.NewFactory(),
+		roundrobinconnector.NewFactory(),
+		routingconnector.NewFactory(),
+		servicegraphconnector.NewFactory(),
+		signaltometricsconnector.NewFactory(),
+		spanmetricsconnector.NewFactory(),
+		sumconnector.NewFactory(),
+	)
+	if err != nil {
+		return otelcol.Factories{}, errors.Wrap(err, "make connector factory map")
+	}
+
+	factories.Exporters, err = otelcol.MakeFactoryMap[exporter.Factory](
+		debugexporter.NewFactory(),
+		nopexporter.NewFactory(),
+		otlpexporter.NewFactory(),
+		otlphttpexporter.NewFactory(),
+		fileexporter.NewFactory(),
+		kafkaexporter.NewFactory(),
+		prometheusexporter.NewFactory(),
+		prometheusremotewriteexporter.NewFactory(),
+	)
+	if err != nil {
+		return otelcol.Factories{}, errors.Wrap(err, "make exporter factory map")
+	}
+
+	factories.Processors, err = otelcol.MakeFactoryMap[processor.Factory](
+		batchprocessor.NewFactory(),
+		attributesprocessor.NewFactory(),
+		k8sattributesprocessor.NewFactory(),
+		resourcedetectionprocessor.NewFactory(),
+		transformprocessor.NewFactory(),
+		filterprocessor.NewFactory(),
+		groupbyattrsprocessor.NewFactory(),
+		probabilisticsamplerprocessor.NewFactory(),
+		memorylimiterprocessor.NewFactory(),
+		resourceprocessor.NewFactory(),
+
+		odbsafetyprocessor.NewFactory(),
+	)
+	if err != nil {
+		return otelcol.Factories{}, errors.Wrap(err, "make processor factory map")
+	}
+
+	return factories, nil
+}

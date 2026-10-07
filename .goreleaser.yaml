@@ -1,5 +1,13 @@
 version: 2
 project_name: oteldb
+
+# Rebuild the admin panel SPA before compiling the binaries so the version
+# embedded via go:embed (internal/adminhandler/frontend/dist) is fresh.
+before:
+  hooks:
+    - sh -c "cd internal/adminhandler/frontend && bun install --frozen-lockfile"
+    - sh -c "cd internal/adminhandler/frontend && bun run build"
+
 builds:
   - id: oteldb
     binary: "oteldb{{ .Ext }}"
@@ -15,6 +23,112 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
       - -trimpath
+
+  - id: chotel
+    binary: "chotel{{ .Ext }}"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - riscv64
+    main: ./cmd/chotel
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+
+  - id: odbbackup
+    binary: "odbbackup{{ .Ext }}"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - riscv64
+    main: ./cmd/odbbackup
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+
+  - id: odbrestore
+    binary: "odbrestore{{ .Ext }}"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - riscv64
+    main: ./cmd/odbrestore
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+
+  - id: odbmigrate
+    binary: "odbmigrate{{ .Ext }}"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - riscv64
+    main: ./cmd/odbmigrate
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+
+  - id: odbingest
+    binary: "odbingest{{ .Ext }}"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - riscv64
+    main: ./cmd/odbingest
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+
+  - id: odbselect
+    binary: "odbselect{{ .Ext }}"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - riscv64
+    main: ./cmd/odbselect
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+
+  - id: odbagent
+    binary: "odbagent{{ .Ext }}"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - riscv64
+    main: ./cmd/odbagent
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+
   - id: docker-logql
     binary: "docker-logql{{ .Ext }}"
     env:
@@ -44,13 +158,12 @@ archives:
     files:
       - README.md
       - LICENSE
-      - cosign.pub
 
 release:
   # prerelease: allow # remove this when we start publishing non-prerelease or set to auto
   # draft: true # allow for manual edits
   github:
-    owner: go-faster
+    owner: oteldb
     name: oteldb
 
   mode: replace
@@ -63,121 +176,149 @@ release:
 
     ```
     {{ .Env.IMAGE }}:v{{ .Version }}
+    ghcr.io/oteldb/oteldb/odbagent:v{{ .Version }}
     ```
 
-  extra_files:
-    # cosign key
-    - glob: "cosign.pub"
+dockers_v2:
+  - id: ubuntu
+    images:
+      - "ghcr.io/oteldb/oteldb"
 
-dockers:
-  # https://goreleaser.com/customization/docker/
-  - use: buildx
-    ids:
-      - oteldb
-    goos: linux
     dockerfile: release.Dockerfile
-    goarch: amd64
-    image_templates:
-      - "{{ .Env.IMAGE }}:{{ .Version }}-amd64"
-      - "{{ .Env.IMAGE }}:v{{ .Version }}-amd64"
-      - "{{ .Env.IMAGE }}:latest-amd64"
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--pull"
-      - "--label=io.artifacthub.package.readme-url=https://raw.githubusercontent.com/go-faster/oteldb/main/README.md"
-      - "--label=io.artifacthub.package.logo-url=https://avatars.githubusercontent.com/u/93744681?"
-      - '--label=io.artifacthub.package.maintainers=[{"name":"Aleksandr Razumov","email":"ernado@go-faster.org"}]'
-      - "--label=io.artifacthub.package.license=Apache 2.0"
-      - "--label=org.opencontainers.image.description=OpenTelemetry signal storage"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.name={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--label=org.opencontainers.image.source={{.GitURL}}"
-  - use: buildx
-    ids:
-      - oteldb
-    goos: linux
-    goarch: arm64
-    dockerfile: release.Dockerfile
-    image_templates:
-      - "{{ .Env.IMAGE }}:{{ .Version }}-arm64"
-      - "{{ .Env.IMAGE }}:v{{ .Version }}-arm64"
-      - "{{ .Env.IMAGE }}:latest-arm64"
-    build_flag_templates:
-      - "--platform=linux/arm64/v8"
-      - "--pull"
-      - "--label=io.artifacthub.package.readme-url=https://raw.githubusercontent.com/go-faster/oteldb/main/README.md"
-      - "--label=io.artifacthub.package.logo-url=https://avatars.githubusercontent.com/u/93744681?"
-      - '--label=io.artifacthub.package.maintainers=[{"name":"Aleksandr Razumov","email":"ernado@go-faster.org"}]'
-      - "--label=io.artifacthub.package.license=Apache 2.0"
-      - "--label=org.opencontainers.image.description=OpenTelemetry signal storage"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.name={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--label=org.opencontainers.image.source={{.GitURL}}"
-  - use: buildx
-    ids:
-      - oteldb
-    goos: linux
-    goarch: riscv64
-    dockerfile: release.Dockerfile
-    image_templates:
-      - "{{ .Env.IMAGE }}:{{ .Version }}-riscv64"
-      - "{{ .Env.IMAGE }}:v{{ .Version }}-riscv64"
-      - "{{ .Env.IMAGE }}:latest-riscv64"
-    build_flag_templates:
-      - "--platform=linux/riscv64"
-      - "--pull"
-      # riscv64 architecture support for static images
-      # https://github.com/go-riscv/distroless
-      # https://github.com/GoogleContainerTools/distroless/issues/1269
-      - "--build-arg"
-      - "IMG=ghcr.io/go-riscv/distroless/static-unstable:nonroot"
-      - "--label=io.artifacthub.package.readme-url=https://raw.githubusercontent.com/go-faster/oteldb/main/README.md"
-      - "--label=io.artifacthub.package.logo-url=https://avatars.githubusercontent.com/u/93744681?"
-      - '--label=io.artifacthub.package.maintainers=[{"name":"Aleksandr Razumov","email":"ernado@go-faster.org"}]'
-      - "--label=io.artifacthub.package.license=Apache 2.0"
-      - "--label=org.opencontainers.image.description=OpenTelemetry signal storage"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.name={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--label=org.opencontainers.image.source={{.GitURL}}"
-docker_manifests:
-  # https://goreleaser.com/customization/docker_manifest/
-  - name_template: "{{ .Env.IMAGE }}:{{ .Version }}"
-    image_templates:
-      - "{{ .Env.IMAGE }}:{{ .Version }}-amd64"
-      - "{{ .Env.IMAGE }}:{{ .Version }}-arm64"
-      - "{{ .Env.IMAGE }}:{{ .Version }}-riscv64"
-  - name_template: "{{ .Env.IMAGE }}:v{{ .Version }}"
-    image_templates:
-      - "{{ .Env.IMAGE }}:v{{ .Version }}-amd64"
-      - "{{ .Env.IMAGE }}:v{{ .Version }}-arm64"
-      - "{{ .Env.IMAGE }}:v{{ .Version }}-riscv64"
-  - name_template: "{{ .Env.IMAGE }}:latest"
-    image_templates:
-      - "{{ .Env.IMAGE }}:latest-amd64"
-      - "{{ .Env.IMAGE }}:latest-arm64"
-      - "{{ .Env.IMAGE }}:latest-riscv64"
 
-docker_signs:
-  - cmd: cosign
-    artifacts: manifests
-    output: true
-    args:
-      - "--key"
-      - "env://COSIGN_PRIVATE_KEY"
-      - "sign"
-      - "${artifact}@${digest}"
-      - --yes
+    # Keep tag in sync with produced images tags.
+    build_args:
+      BASE_IMAGE: "ubuntu:questing"
+
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+    tags:
+      - "{{ if not .IsNightly }}latest{{ end }}"
+      - "{{ if not .IsNightly }}latest-ubuntu{{ end }}"
+      - "{{ if not .IsNightly }}ubuntu{{ end }}"
+      - "{{ if not .IsNightly }}questing{{ end }}"
+      - "v{{ .Version }}"
+      - "v{{ .Version }}-ubuntu"
+      - "v{{ .Version }}-questing"
+      - "{{ if .IsNightly }}nightly-ubuntu{{ end }}"
+      - "{{ if .IsNightly }}nightly-questing{{ end }}"
+
+    labels:
+      "io.artifacthub.package.readme-url": "https://github.com/oteldb/oteldb/blob/main/README.md"
+      "io.artifacthub.package.logo-url": "https://avatars.githubusercontent.com/u/131437363"
+      "io.artifacthub.package.maintainers": '[{"name":"Aleksandr Razumov","email":"ernado@go-faster.org"},{"name":"tdakkota","email":"oteldb@tdakkota.dev"}]'
+      "io.artifacthub.package.license": "Apache 2.0"
+
+      "org.opencontainers.image.description": "OpenTelemetry signal storage"
+      "org.opencontainers.image.created": "{{.Date}}"
+      "org.opencontainers.image.name": "{{.ProjectName}}"
+      "org.opencontainers.image.revision": "{{.FullCommit}}"
+      "org.opencontainers.image.version": "{{.Version}}"
+      "org.opencontainers.image.source": "{{.GitURL}}"
+
+  - id: distroless
+    images:
+      - "ghcr.io/oteldb/oteldb"
+
+    dockerfile: release.Dockerfile
+
+    build_args:
+      BASE_IMAGE: "gcr.io/distroless/static"
+
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+    tags:
+      - "{{ if not .IsNightly }}distroless{{ end }}"
+      - "v{{ .Version }}-distroless"
+      - "{{ if .IsNightly }}nightly-distroless{{ end }}"
+
+    labels:
+      "io.artifacthub.package.readme-url": "https://github.com/oteldb/oteldb/blob/main/README.md"
+      "io.artifacthub.package.logo-url": "https://avatars.githubusercontent.com/u/131437363"
+      "io.artifacthub.package.maintainers": '[{"name":"Aleksandr Razumov","email":"ernado@go-faster.org"},{"name":"tdakkota","email":"oteldb@tdakkota.dev"}]'
+      "io.artifacthub.package.license": "Apache 2.0"
+
+      "org.opencontainers.image.description": "OpenTelemetry signal storage"
+      "org.opencontainers.image.created": "{{.Date}}"
+      "org.opencontainers.image.name": "{{.ProjectName}}"
+      "org.opencontainers.image.revision": "{{.FullCommit}}"
+      "org.opencontainers.image.version": "{{.Version}}"
+      "org.opencontainers.image.source": "{{.GitURL}}"
+
+  - id: distroless-chotel
+    images:
+      - "ghcr.io/oteldb/oteldb/chotel"
+
+    dockerfile: release.Dockerfile
+
+    build_args:
+      BASE_IMAGE: "gcr.io/distroless/static"
+
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+    tags:
+      - "{{ if not .IsNightly }}latest{{ end }}"
+      - "{{ if not .IsNightly }}distroless{{ end }}"
+      - "v{{ .Version }}"
+      - "v{{ .Version }}-distroless"
+      - "{{ if .IsNightly }}nightly-distroless{{ end }}"
+
+    labels:
+      "io.artifacthub.package.readme-url": "https://github.com/oteldb/oteldb/blob/main/README.md"
+      "io.artifacthub.package.logo-url": "https://avatars.githubusercontent.com/u/131437363"
+      "io.artifacthub.package.maintainers": '[{"name":"Aleksandr Razumov","email":"ernado@go-faster.org"},{"name":"tdakkota","email":"oteldb@tdakkota.dev"}]'
+      "io.artifacthub.package.license": "Apache 2.0"
+
+      "org.opencontainers.image.description": "OpenTelemetry signal storage"
+      "org.opencontainers.image.created": "{{.Date}}"
+      "org.opencontainers.image.name": "{{.ProjectName}}"
+      "org.opencontainers.image.revision": "{{.FullCommit}}"
+      "org.opencontainers.image.version": "{{.Version}}"
+      "org.opencontainers.image.source": "{{.GitURL}}"
+
+  - id: distroless-odbagent
+    images:
+      - "ghcr.io/oteldb/oteldb/odbagent"
+
+    dockerfile: odbagent.Dockerfile
+
+    build_args:
+      BASE_IMAGE: "gcr.io/distroless/static"
+
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+    tags:
+      - "{{ if not .IsNightly }}latest{{ end }}"
+      - "{{ if not .IsNightly }}distroless{{ end }}"
+      - "v{{ .Version }}"
+      - "v{{ .Version }}-distroless"
+      - "{{ if .IsNightly }}nightly-distroless{{ end }}"
+
+    labels:
+      "io.artifacthub.package.readme-url": "https://github.com/oteldb/oteldb/blob/main/README.md"
+      "io.artifacthub.package.logo-url": "https://avatars.githubusercontent.com/u/131437363"
+      "io.artifacthub.package.maintainers": '[{"name":"Aleksandr Razumov","email":"ernado@go-faster.org"},{"name":"tdakkota","email":"oteldb@tdakkota.dev"}]'
+      "io.artifacthub.package.license": "Apache 2.0"
+
+      "org.opencontainers.image.description": "OpenTelemetry Collector agent for oteldb"
+      "org.opencontainers.image.created": "{{.Date}}"
+      "org.opencontainers.image.name": "odbagent"
+      "org.opencontainers.image.revision": "{{.FullCommit}}"
+      "org.opencontainers.image.version": "{{.Version}}"
+      "org.opencontainers.image.source": "{{.GitURL}}"
 
 checksum:
   name_template: "checksums.txt"
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
@@ -235,9 +376,16 @@ sboms:
 nfpms:
   - id: oteldb
     package_name: oteldb
-    builds:
+    ids:
       - oteldb
-    homepage: https://github.com/go-faster/oteldb
+      - chotel
+      - odbbackup
+      - odbrestore
+      - odbmigrate
+      - odbingest
+      - odbselect
+      - odbagent
+    homepage: https://github.com/oteldb/oteldb
     maintainer: Aleksandr Razumov <ernado@go-faster.org>
     description: OpenTelemetry signal storage
     license: Apache 2.0
@@ -252,9 +400,9 @@ nfpms:
         - changelog-file-missing-in-native-package
   - id: docker-logql
     package_name: docker-logql
-    builds:
+    ids:
       - docker-logql
-    homepage: https://github.com/go-faster/oteldb/tree/main/cmd/docker-logql
+    homepage: https://github.com/oteldb/oteldb/tree/main/cmd/docker-logql
     maintainer: Aleksandr Razumov <ernado@go-faster.org>
     description: A simple Docker CLI plugin to run LogQL queries over container logs.
     license: Apache 2.0

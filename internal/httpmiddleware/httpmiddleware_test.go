@@ -3,21 +3,28 @@ package httpmiddleware
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/go-faster/sdk/zctx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
-	"github.com/go-faster/oteldb/integration"
+	"github.com/oteldb/oteldb/integration"
 )
 
 type testHandler struct{}
@@ -50,7 +57,7 @@ func TestInjectLogger(t *testing.T) {
 type testOgenServer struct{}
 
 func (*testOgenServer) FindPath(method string, u *url.URL) (r testOgenRoute, _ bool) {
-	if method != http.MethodGet || u.Path != "/foo" {
+	if method != http.MethodGet || u.Path != testOgenRoutePath {
 		return r, false
 	}
 	return r, true
@@ -58,8 +65,14 @@ func (*testOgenServer) FindPath(method string, u *url.URL) (r testOgenRoute, _ b
 
 type testOgenRoute struct{}
 
-func (testOgenRoute) Name() string        { return "TestOgenRoute" }
-func (testOgenRoute) OperationID() string { return "testOgenRoute" }
+const (
+	testOgenRoutePath = "/foo"
+	testOgenRouteName = "TestOgenRoute"
+	testOgenRouteID   = "testOgenRoute"
+)
+
+func (testOgenRoute) Name() string        { return testOgenRouteName }
+func (testOgenRoute) OperationID() string { return testOgenRouteID }
 
 func TestLogRequests(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
@@ -77,7 +90,7 @@ func TestLogRequests(t *testing.T) {
 	h.ServeHTTP(nil, &http.Request{
 		Method: http.MethodGet,
 		URL: &url.URL{
-			Path: "/foo",
+			Path: testOgenRoutePath,
 		},
 	})
 
@@ -96,7 +109,7 @@ func TestLogRequests(t *testing.T) {
 	fields = entry.ContextMap()
 	require.Len(t, fields, 4)
 	require.Equal(t, http.MethodGet, fields["method"])
-	require.Equal(t, "/foo", fields["url"])
+	require.Equal(t, testOgenRoutePath, fields["url"])
 	require.Equal(t, "TestOgenRoute", fields["operationName"])
 	require.Equal(t, "testOgenRoute", fields["operationId"])
 }
@@ -137,6 +150,184 @@ func TestWrap(t *testing.T) {
 	require.Equal(t, []int{1, 2, 3}, calls)
 }
 
+type testMetrics struct {
+	meterProvider     metric.MeterProvider
+	textMapPropagator propagation.TextMapPropagator
+	tracerProvider    trace.TracerProvider
+}
+
+var _ Metrics = (*testMetrics)(nil)
+
+// MeterProvider implements [Metrics].
+func (t *testMetrics) MeterProvider() metric.MeterProvider {
+	return t.meterProvider
+}
+
+// TextMapPropagator implements [Metrics].
+func (t *testMetrics) TextMapPropagator() propagation.TextMapPropagator {
+	return t.textMapPropagator
+}
+
+// TracerProvider implements [Metrics].
+func (t *testMetrics) TracerProvider() trace.TracerProvider {
+	return t.tracerProvider
+}
+
+func TestInstrument(t *testing.T) {
+	const (
+		code        = http.StatusOK
+		addr        = "aboba"
+		port        = 9090
+		service     = "abobapi"
+		contentType = "application/json"
+	)
+
+	attrSet := func(base attribute.Set, kvs ...attribute.KeyValue) attribute.Set {
+		return attribute.NewSet(slices.Concat(base.ToSlice(), kvs)...)
+	}
+
+	provider := integration.NewProvider()
+	fn := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(code)
+	})
+	h := Wrap(fn,
+		Instrument(
+			net.JoinHostPort(addr, strconv.Itoa(port)),
+			service,
+			MakeRouteFinder((*testOgenServer)(nil)),
+			&testMetrics{
+				meterProvider:     provider.MeterProvider,
+				textMapPropagator: propagation.Baggage{},
+				tracerProvider:    provider.TracerProvider,
+			},
+		),
+	)
+	rw := httptest.NewRecorder()
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL: &url.URL{
+			Path: testOgenRoutePath,
+		},
+		Header: http.Header{},
+	}
+	req.Header.Set("Accept", contentType)
+	h.ServeHTTP(rw, req.WithContext(context.Background()))
+	require.Equal(t, http.StatusOK, rw.Code)
+	provider.Flush()
+
+	otelhttpAttrs := attrSet(attribute.Set{},
+		attribute.String("http.request.method", req.Method),
+		attribute.Int("http.response.status_code", code),
+		attribute.String("server.address", addr),
+		attribute.Int("server.port", port),
+		attribute.String("url.path", testOgenRoutePath),
+		attribute.String("url.scheme", "http"),
+	)
+	spanAttrs := attrSet(otelhttpAttrs,
+		attribute.String("http.request.header.accept", contentType),
+		attribute.String("http.response.header.content_type", contentType),
+	)
+	{
+		spans := provider.Exporter.GetSpans()
+		require.Len(t, spans, 1)
+		span := spans[0]
+
+		spanSet := attrSet(attribute.Set{}, span.Attributes...)
+		require.Equal(t,
+			spanAttrs.ToSlice(),
+			spanSet.ToSlice(),
+		)
+	}
+	{
+		ctx := t.Context()
+
+		// Check server metrics
+		var rm metricdata.ResourceMetrics
+		err := provider.Reader.Collect(ctx, &rm)
+		require.NoError(t, err)
+
+		require.Len(t, rm.ScopeMetrics, 1)
+		scope := rm.ScopeMetrics[0]
+
+		for _, m := range scope.Metrics {
+			var attrs []attribute.KeyValue
+			switch d := m.Data.(type) {
+			case metricdata.Gauge[int64]:
+				for _, p := range d.DataPoints {
+					attrs = p.Attributes.ToSlice()
+					if len(attrs) != 0 {
+						break
+					}
+				}
+			case metricdata.Gauge[float64]:
+				for _, p := range d.DataPoints {
+					attrs = p.Attributes.ToSlice()
+					if len(attrs) != 0 {
+						break
+					}
+				}
+			case metricdata.Sum[int64]:
+				for _, p := range d.DataPoints {
+					attrs = p.Attributes.ToSlice()
+					if len(attrs) != 0 {
+						break
+					}
+				}
+			case metricdata.Sum[float64]:
+				for _, p := range d.DataPoints {
+					attrs = p.Attributes.ToSlice()
+					if len(attrs) != 0 {
+						break
+					}
+				}
+			case metricdata.ExponentialHistogram[int64]:
+				for _, p := range d.DataPoints {
+					attrs = p.Attributes.ToSlice()
+					if len(attrs) != 0 {
+						break
+					}
+				}
+			case metricdata.ExponentialHistogram[float64]:
+				for _, p := range d.DataPoints {
+					attrs = p.Attributes.ToSlice()
+					if len(attrs) != 0 {
+						break
+					}
+				}
+			case metricdata.Histogram[int64]:
+				for _, p := range d.DataPoints {
+					attrs = p.Attributes.ToSlice()
+					if len(attrs) != 0 {
+						break
+					}
+				}
+			case metricdata.Histogram[float64]:
+				for _, p := range d.DataPoints {
+					attrs = p.Attributes.ToSlice()
+					if len(attrs) != 0 {
+						break
+					}
+				}
+			}
+			t.Logf("metric: %q", m.Name)
+
+			expectedSet := attrSet(otelhttpAttrs,
+				attribute.String("oas.route.name", testOgenRouteName),
+				attribute.String("oas.operation.id", testOgenRouteID),
+				attribute.String("oteldb.api", service),
+			)
+			expectedSet, _ = expectedSet.Filter(attribute.NewDenyKeysFilter(
+				"url.path",
+			))
+			assert.Equal(t,
+				expectedSet.ToSlice(),
+				attrs,
+			)
+		}
+	}
+}
+
 func TestInstrumentation(t *testing.T) {
 	provider := integration.NewProvider()
 	tracer := provider.Tracer("test")
@@ -169,7 +360,7 @@ func TestInstrumentation(t *testing.T) {
 	req := &http.Request{
 		Method: http.MethodGet,
 		URL: &url.URL{
-			Path: "/foo",
+			Path: testOgenRoutePath,
 		},
 	}
 	h.ServeHTTP(rw, req.WithContext(context.Background()))
@@ -177,7 +368,4 @@ func TestInstrumentation(t *testing.T) {
 	provider.Flush()
 	spans := provider.Exporter.GetSpans()
 	assert.Len(t, spans, 3)
-	for _, s := range spans {
-		t.Logf("%s [%s]", s.Name, s.SpanContext.TraceID())
-	}
 }

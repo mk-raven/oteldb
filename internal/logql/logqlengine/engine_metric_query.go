@@ -9,11 +9,12 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlerrors"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlmetric"
-	"github.com/go-faster/oteldb/internal/lokiapi"
-	"github.com/go-faster/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlerrors"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlmetric"
+	"github.com/oteldb/oteldb/internal/lokiapi"
+	"github.com/oteldb/oteldb/internal/xattribute"
+	"github.com/oteldb/oteldb/internal/xspan"
 )
 
 // MetricQuery represents a metric query.
@@ -60,10 +61,7 @@ func (q *MetricQuery) eval(ctx context.Context, params EvalParams) (data lokiapi
 	))
 	defer func() {
 		q.stats.QueryDuration.Record(ctx, time.Since(start).Seconds())
-		if rerr != nil {
-			span.RecordError(rerr)
-		}
-		span.End()
+		xspan.End(span, rerr)
 	}()
 
 	iter, err := q.Root.EvalMetric(ctx, MetricParams{
@@ -85,8 +83,19 @@ func (q *MetricQuery) eval(ctx context.Context, params EvalParams) (data lokiapi
 	if err != nil {
 		return data, err
 	}
+
+	var count attribute.KeyValue
+	switch data.Type {
+	case lokiapi.MatrixResultQueryResponseData:
+		count = attribute.Int("logql.data.series", len(data.MatrixResult.Result))
+	case lokiapi.VectorResultQueryResponseData:
+		count = attribute.Int("logql.data.points", len(data.VectorResult.Result))
+	default:
+		count = attribute.Int("logql.data.points", 0)
+	}
 	span.AddEvent("return_result", trace.WithAttributes(
 		attribute.String("logql.data.type", string(data.Type)),
+		count,
 	))
 
 	return data, nil

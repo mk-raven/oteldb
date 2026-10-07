@@ -3,13 +3,15 @@ package pyroproxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/go-faster/errors"
 	"github.com/go-faster/sdk/zctx"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
-	"github.com/go-faster/oteldb/internal/pyroscopeapi"
+	"github.com/oteldb/oteldb/internal/pyroscopeapi"
 )
 
 var _ pyroscopeapi.Handler = &Server{}
@@ -66,7 +68,7 @@ func (s *Server) Labels(ctx context.Context, params pyroscopeapi.LabelsParams) (
 // One of `query` or `key` is required.
 //
 // GET /render
-func (s *Server) Render(ctx context.Context, params pyroscopeapi.RenderParams) (*pyroscopeapi.FlamebearerProfileV1, error) {
+func (s *Server) Render(ctx context.Context, params pyroscopeapi.RenderParams) (pyroscopeapi.RenderRes, error) {
 	return s.api.Render(ctx, params)
 }
 
@@ -79,8 +81,17 @@ func (s *Server) NewError(ctx context.Context, err error) *pyroscopeapi.ErrorSta
 		// Pass as-is.
 		return v
 	}
+	msg := appendTrace(ctx, err.Error())
 	return &pyroscopeapi.ErrorStatusCode{
 		StatusCode: http.StatusInternalServerError,
-		Response:   pyroscopeapi.Error(err.Error()),
+		Response:   pyroscopeapi.Error(msg),
 	}
+}
+
+func appendTrace(ctx context.Context, s string) string {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return s
+	}
+	return fmt.Sprintf("%s (trace_id=%s, span_id=%s)", s, sc.TraceID(), sc.SpanID())
 }

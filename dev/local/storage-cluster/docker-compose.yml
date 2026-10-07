@@ -1,0 +1,253 @@
+# Clustered oteldb on the embedded storage engine — no ClickHouse, no shared object store.
+#
+# Three oteldb nodes each keep their shards on a LOCAL file backend and replicate writes to each
+# other (RF=2) over an etcd-coordinated rendezvous-hash ring. Ingest into any node and it routes the
+# write to the owning replicas; query any node and it fans out across the ring and merges. The demo
+# ingests at two different nodes to show ingest-anywhere, and Grafana queries a third.
+#
+#   docker compose -f dev/local/storage-cluster/docker-compose.yml up --build
+#
+# Open Grafana at http://localhost:3000. Stop a node (docker compose stop oteldb-2) and data is still
+# served by its replicas.
+version: "3"
+
+volumes:
+  oteldb-1-data:
+  oteldb-2-data:
+  oteldb-3-data:
+  etcd-data:
+
+# Common definition for an oteldb cluster node. Each node runs --embedded (all signals on the
+# storage engine) and joins the cluster via the shared oteldb.yml; its ring id/address come from
+# its hostname, so the three nodes differ only by hostname and data volume.
+x-oteldb-node: &oteldb-node
+  image: ghcr.io/oteldb/oteldb
+  # Never pull: ghcr.io/oteldb/oteldb is published, so the default policy would fetch a build that
+  # predates the local cluster wiring. `never` still builds when the image is absent, and reuses it
+  # afterwards -- `--build` forces a rebuild, which `build` would otherwise do on every `up`.
+  pull_policy: never
+  build:
+    context: ../../../
+    # CI sets CLUSTER_DOCKERFILE to deploy.Dockerfile, which bakes in binaries already built on the
+    # host with a warm Go cache instead of compiling in-container. Same image either way.
+    dockerfile: ${CLUSTER_DOCKERFILE:-dev/Dockerfile}
+  command:
+    - --embedded
+    - --config=/etc/oteldb/oteldb.yml
+  environment:
+    - OTEL_LOG_LEVEL=info
+    # The cluster stores its own telemetry, as the other demos do, by way of otelcol -- so the
+    # pipeline is one file to edit instead of an environment change per service. The sdk tees zap
+    # into the OTLP bridge, so `docker logs` keeps working while the records also reach the ring.
+    - OTEL_METRICS_EXPORTER=otlp
+    - OTEL_TRACES_EXPORTER=otlp
+    - OTEL_LOGS_EXPORTER=otlp
+    - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+    - OTEL_EXPORTER_OTLP_INSECURE=true
+    - OTEL_EXPORTER_OTLP_ENDPOINT=http://otelcol:4317
+    - OTEL_METRIC_EXPORT_INTERVAL=5000
+  restart: unless-stopped
+  # A limit here is not just a blast radius: the sdk reads the cgroup at startup and sets GOMAXPROCS
+  # from the CPU quota and GOMEMLIMIT from the memory limit, and oteldb sizes its read cache, decode
+  # cache, decode-admission budget and max_query_bytes off that same GOMEMLIMIT. So the number below
+  # is what makes the process back off and refuse work, rather than what decides who the OOM killer
+  # takes. Without it every service sees the whole 30 GiB host and sizes itself for a machine it does
+  # not have to itself.
+  deploy:
+    resources:
+      limits:
+        cpus: "4"
+        memory: 4g
+  depends_on:
+    etcd:
+      condition: service_healthy
+
+# The demo workload. Both services share one image, so both must know how to build it: with only
+# `image:` set, compose tries to pull a tag that is never published.
+x-oteldemo: &oteldemo
+  image: ghcr.io/oteldb/oteldb/oteldemo
+  pull_policy: never
+  build:
+    context: ../../../
+    dockerfile: dev/Dockerfile
+    args:
+      TARGETS: oteldemo
+      ENTRYPOINT_BIN: oteldemo
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    command:
+      - etcd
+      - --name=etcd0
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd0=http://etcd:2380
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+
+  oteldb-1:
+    <<: *oteldb-node
+    hostname: oteldb-1
+    volumes:
+      - ./oteldb.yml:/etc/oteldb/oteldb.yml:ro
+      - oteldb-1-data:/data
+    ports:
+      - "9090:9090" # Prometheus / PromQL
+      - "3100:3100" # Loki / LogQL
+      - "3200:3200" # Tempo / TraceQL
+      - "4040:4040" # Pyroscope / ProfileQL
+      - "4317:4317" # OTLP gRPC ingestion
+      # The admin panel is per-node: it reports this process's own heap, goroutines, shards and
+      # ingest counters, not the ring's. All three are published (8090/18090/28090, as PromQL gets
+      # 9090/9091/9092) so a single published port cannot be mistaken for a cluster-wide view.
+      # The odbadmin service below serves the cluster-aggregated panel on 38090.
+      - "8090:8090" # this node's admin panel
+
+  oteldb-2:
+    <<: *oteldb-node
+    hostname: oteldb-2
+    volumes:
+      - ./oteldb.yml:/etc/oteldb/oteldb.yml:ro
+      - oteldb-2-data:/data
+    ports:
+      - "9091:9090"  # this node's PromQL (to show any node answers the full query)
+      - "14317:4317" # this node's OTLP gRPC (host-side ingest target for cmd/cluster-verify)
+      - "18090:8090" # this node's admin panel
+
+  oteldb-3:
+    <<: *oteldb-node
+    hostname: oteldb-3
+    volumes:
+      - ./oteldb.yml:/etc/oteldb/oteldb.yml:ro
+      - oteldb-3-data:/data
+    ports:
+      - "9092:9090"
+      - "28090:8090" # this node's admin panel
+
+  # The cluster-wide admin panel. Unlike the per-node panels above it holds no engine: it follows
+  # the ring to find the members, asks each one's admin API, and merges. That merge is the reason it
+  # exists -- with rf: 2 a node's own report describes one replica, and summing the three
+  # double-counts, so only this view can say what the cluster actually stores.
+  odbadmin:
+    <<: *oteldb-node
+    entrypoint: ["odbadmin"]
+    command: ["--config=/etc/oteldb/odbadmin.yml"]
+    volumes:
+      - ./odbadmin.yml:/etc/oteldb/odbadmin.yml:ro
+    ports:
+      - "38090:8090" # cluster-aggregated admin panel (8090/18090/28090 are the per-node ones)
+    # Overrides the node anchor's limit: this one holds no engine, it only merges peer reports.
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
+    depends_on:
+      - etcd
+      - oteldb-1
+      - oteldb-2
+      - oteldb-3
+
+  # Handles requests from the client; ingests its telemetry at oteldb-2.
+  server:
+    <<: *oteldemo
+    profiles: [demo]
+    command: ["server"]
+    restart: always
+    environment:
+      - OTEL_LOG_LEVEL=info
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_EXPORTER_OTLP_INSECURE=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://oteldb-2:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=server
+      - OTEL_METRIC_EXPORT_INTERVAL=5000
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256m
+    depends_on:
+      - oteldb-2
+
+  # Calls the server once per second; ingests its telemetry at oteldb-1.
+  client:
+    <<: *oteldemo
+    profiles: [demo]
+    command: ["client"]
+    restart: always
+    environment:
+      - OTEL_LOG_LEVEL=info
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_EXPORTER_OTLP_INSECURE=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://oteldb-1:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=client
+      - OTEL_METRIC_EXPORT_INTERVAL=5000
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256m
+    depends_on:
+      - oteldb-1
+      - server
+
+  # Pipeline for the cluster's own telemetry: every process ships here, and this forwards to the
+  # ring. Editing otelcol.yml changes what is kept without touching the services.
+  otelcol:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.159.0
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./otelcol.yml:/etc/otelcol/config.yml:ro
+    environment:
+      # The ring's front door. The split overlay points this at odbingest instead.
+      - OTELDB_OTLP_ENDPOINT=oteldb-1:4317
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+    depends_on:
+      - oteldb-1
+
+  grafana:
+    image: "grafana/grafana-oss:13.0.2"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,traceToMetrics
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/default.yml:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+    depends_on:
+      - oteldb-1

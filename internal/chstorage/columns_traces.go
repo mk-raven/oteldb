@@ -9,12 +9,12 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 
-	"github.com/go-faster/oteldb/internal/chstorage/chsql"
-	"github.com/go-faster/oteldb/internal/ddl"
-	"github.com/go-faster/oteldb/internal/otelstorage"
-	"github.com/go-faster/oteldb/internal/traceql"
-	"github.com/go-faster/oteldb/internal/tracestorage"
-	"github.com/go-faster/oteldb/internal/xsync"
+	"github.com/oteldb/oteldb/internal/chstorage/chsql"
+	"github.com/oteldb/oteldb/internal/ddl"
+	"github.com/oteldb/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/internal/traceql"
+	"github.com/oteldb/oteldb/internal/tracestorage"
+	"github.com/oteldb/oteldb/internal/xsync"
 )
 
 var (
@@ -210,7 +210,7 @@ func (c *spanColumns) ReadRowsTo(spans []tracestorage.Span) ([]tracestorage.Span
 
 func (c *spanColumns) DDL() ddl.Table {
 	table := ddl.Table{
-		Engine:     "MergeTree",
+		Engine:     ddl.Engine{Type: "MergeTree"},
 		PrimaryKey: []string{"service_namespace", "service_name", "resource"},
 		OrderBy:    []string{"service_namespace", "service_name", "resource", "start"},
 		TTL:        ddl.TTL{Field: "start"},
@@ -383,7 +383,7 @@ func (c *eventsColumns) Row(row int) (events []tracestorage.Event, _ error) {
 			len(attributes),
 		)
 	)
-	for i := 0; i < l; i++ {
+	for i := range l {
 		attrs, err := decodeAttributes(attributes[i])
 		if err != nil {
 			return nil, errors.Wrap(err, "decode attributes")
@@ -448,7 +448,7 @@ func (c *linksColumns) Row(row int) (links []tracestorage.Link, _ error) {
 			len(attributes),
 		)
 	)
-	for i := 0; i < l; i++ {
+	for i := range l {
 		attrs, err := decodeAttributes(attributes[i])
 		if err != nil {
 			return nil, errors.Wrap(err, "decode attributes")

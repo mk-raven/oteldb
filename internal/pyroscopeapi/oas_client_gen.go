@@ -4,6 +4,7 @@ package pyroscopeapi
 
 import (
 	"context"
+	"io"
 	"net/url"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
-	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -29,8 +30,7 @@ func trimTrailingSlashes(u *url.URL) {
 type Invoker interface {
 	// GetApps invokes getApps operation.
 	//
-	// Returns list of application metadata.
-	// Used by Grafana to test connection to Pyroscope.
+	// Returns list of application metadata. Used by Grafana to test connection to Pyroscope.
 	//
 	// GET /api/apps
 	GetApps(ctx context.Context) ([]ApplicationMetadata, error)
@@ -54,11 +54,10 @@ type Invoker interface {
 	Labels(ctx context.Context, params LabelsParams) (Labels, error)
 	// Render invokes render operation.
 	//
-	// Renders given query.
-	// One of `query` or `key` is required.
+	// Renders given query. One of `query` or `key` is required.
 	//
 	// GET /render
-	Render(ctx context.Context, params RenderParams) (*FlamebearerProfileV1, error)
+	Render(ctx context.Context, params RenderParams) (RenderRes, error)
 }
 
 // Client implements OAS client.
@@ -66,14 +65,6 @@ type Client struct {
 	serverURL *url.URL
 	baseClient
 }
-type errorHandler interface {
-	NewError(ctx context.Context, err error) *ErrorStatusCode
-}
-
-var _ Handler = struct {
-	errorHandler
-	*Client
-}{}
 
 // NewClient initializes new Client defined by OAS.
 func NewClient(serverURL string, opts ...ClientOption) (*Client, error) {
@@ -110,8 +101,7 @@ func (c *Client) requestURL(ctx context.Context) *url.URL {
 
 // GetApps invokes getApps operation.
 //
-// Returns list of application metadata.
-// Used by Grafana to test connection to Pyroscope.
+// Returns list of application metadata. Used by Grafana to test connection to Pyroscope.
 //
 // GET /api/apps
 func (c *Client) GetApps(ctx context.Context) ([]ApplicationMetadata, error) {
@@ -171,7 +161,14 @@ func (c *Client) sendGetApps(ctx context.Context) (res []ApplicationMetadata, er
 	if err != nil {
 		return res, errors.Wrap(err, "do request")
 	}
-	defer resp.Body.Close()
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
 
 	stage = "DecodeResponse"
 	result, err := decodeGetAppsResponse(resp)
@@ -393,7 +390,14 @@ func (c *Client) sendIngest(ctx context.Context, request *IngestReqWithContentTy
 	if err != nil {
 		return res, errors.Wrap(err, "do request")
 	}
-	defer resp.Body.Close()
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
 
 	stage = "DecodeResponse"
 	result, err := decodeIngestResponse(resp)
@@ -541,7 +545,14 @@ func (c *Client) sendLabelValues(ctx context.Context, params LabelValuesParams) 
 	if err != nil {
 		return res, errors.Wrap(err, "do request")
 	}
-	defer resp.Body.Close()
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
 
 	stage = "DecodeResponse"
 	result, err := decodeLabelValuesResponse(resp)
@@ -675,7 +686,14 @@ func (c *Client) sendLabels(ctx context.Context, params LabelsParams) (res Label
 	if err != nil {
 		return res, errors.Wrap(err, "do request")
 	}
-	defer resp.Body.Close()
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
 
 	stage = "DecodeResponse"
 	result, err := decodeLabelsResponse(resp)
@@ -688,16 +706,15 @@ func (c *Client) sendLabels(ctx context.Context, params LabelsParams) (res Label
 
 // Render invokes render operation.
 //
-// Renders given query.
-// One of `query` or `key` is required.
+// Renders given query. One of `query` or `key` is required.
 //
 // GET /render
-func (c *Client) Render(ctx context.Context, params RenderParams) (*FlamebearerProfileV1, error) {
+func (c *Client) Render(ctx context.Context, params RenderParams) (RenderRes, error) {
 	res, err := c.sendRender(ctx, params)
 	return res, err
 }
 
-func (c *Client) sendRender(ctx context.Context, params RenderParams) (res *FlamebearerProfileV1, err error) {
+func (c *Client) sendRender(ctx context.Context, params RenderParams) (res RenderRes, err error) {
 	otelAttrs := []attribute.KeyValue{
 		otelogen.OperationID("render"),
 		semconv.HTTPRequestMethodKey.String("GET"),
@@ -878,7 +895,14 @@ func (c *Client) sendRender(ctx context.Context, params RenderParams) (res *Flam
 	if err != nil {
 		return res, errors.Wrap(err, "do request")
 	}
-	defer resp.Body.Close()
+	body := resp.Body
+	defer func() {
+		// Drain the body to EOF before closing, so the underlying
+		// connection can be reused by the Transport regardless of the
+		// response status code. See https://github.com/ogen-go/ogen/issues/1670.
+		_, _ = io.Copy(io.Discard, body)
+		_ = body.Close()
+	}()
 
 	stage = "DecodeResponse"
 	result, err := decodeRenderResponse(resp)

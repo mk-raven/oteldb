@@ -5,26 +5,6 @@ func Function(name string, args ...Expr) Expr {
 	return Expr{typ: exprFunction, tok: name, args: args}
 }
 
-// Cast returns `CAST(<x>, <typ>)` function call expression.
-func Cast(x Expr, typ string) Expr {
-	return Function("CAST", x, String(typ))
-}
-
-// ToString returns `toString(<arg>)` function call expression.
-func ToString(arg Expr) Expr {
-	return Function("toString", arg)
-}
-
-// ToFloat64 returns `toFloat64(<arg>)` function call expression.
-func ToFloat64(arg Expr) Expr {
-	return Function("toFloat64", arg)
-}
-
-// ToUnixTimestamp64Nano returns `toUnixTimestamp64Nano(<arg>)` function call expression.
-func ToUnixTimestamp64Nano(arg Expr) Expr {
-	return Function("toUnixTimestamp64Nano", arg)
-}
-
 // Coalesce returns `coalesce(<args>...)` function call expression.
 func Coalesce(args ...Expr) Expr {
 	return Function("coalesce", args...)
@@ -50,6 +30,36 @@ func Array(args ...Expr) Expr {
 	return Function("array", args...)
 }
 
+// ArrayElement returns `arrayElement(<arr>, <index>)` function call expression.
+func ArrayElement(arr, index Expr) Expr {
+	return Function("arrayElement", arr, index)
+}
+
+// TupleElement returns `tupleElement(<tup>, <index>)` function call expression.
+func TupleElement(tup Expr, index int) Expr {
+	return Function("tupleElement", tup, Integer(index))
+}
+
+// If returns `if(<cond>, <then>, <else>)` function call expression.
+func If(cond, then, elseExpr Expr) Expr {
+	return Function("if", cond, then, elseExpr)
+}
+
+// Greatest returns `greatest(<args>...)` function call expression.
+func Greatest(args ...Expr) Expr {
+	return Function("greatest", args...)
+}
+
+// Least returns `least(<args>...)` function call expression.
+func Least(args ...Expr) Expr {
+	return Function("least", args...)
+}
+
+// IntDiv returns `intDiv(<a>, <b>)` function call expression.
+func IntDiv(a, b Expr) Expr {
+	return Function("intDiv", a, b)
+}
+
 // ArrayConcat returns `arrayConcat(<args>...)` function call expression.
 func ArrayConcat(args ...Expr) Expr {
 	return Function("arrayConcat", args...)
@@ -60,6 +70,41 @@ func ArrayJoin(args ...Expr) Expr {
 	return Function("arrayJoin", args...)
 }
 
+// ArrayFilter returns `arrayFilter(<lambda>, <arr>)` function call expression.
+func ArrayFilter(lambda, arr Expr) Expr {
+	return Function("arrayFilter", lambda, arr)
+}
+
+// ArrayMap returns `arrayMap(<lambda>, <arr>)` function call expression.
+func ArrayMap(lambda, arr Expr) Expr {
+	return Function("arrayMap", lambda, arr)
+}
+
+// ArraySort returns `arraySort(<lambda>, <arr>)` function call expression.
+func ArraySort(lambda, arr Expr) Expr {
+	return Function("arraySort", lambda, arr)
+}
+
+// ArraySum returns `arraySum(<lambda>, <args>...)` function call expression.
+func ArraySum(lambda Expr, args ...Expr) Expr {
+	return Function("arraySum", append([]Expr{lambda}, args...)...)
+}
+
+// ArrayPopFront returns `arrayPopFront(<arr>)` function call expression.
+func ArrayPopFront(arr Expr) Expr {
+	return Function("arrayPopFront", arr)
+}
+
+// ArrayPopBack returns `arrayPopBack(<arr>)` function call expression.
+func ArrayPopBack(arr Expr) Expr {
+	return Function("arrayPopBack", arr)
+}
+
+// Range returns `range(<n>)` function call expression.
+func Range(n Expr) Expr {
+	return Function("range", n)
+}
+
 // Hex returns `hex(<arg>)` function call expression.
 func Hex(arg Expr) Expr {
 	return Function("hex", arg)
@@ -68,59 +113,4 @@ func Hex(arg Expr) Expr {
 // Unhex returns `unhex(<arg>)` function call expression.
 func Unhex(arg Expr) Expr {
 	return Function("unhex", arg)
-}
-
-// Length returns `length(<arg>)` function call expression.
-func Length(arg Expr) Expr {
-	return Function("length", arg)
-}
-
-// Like returns `like(<haystack>, <pattern>)` function call expression.
-func Like(haystack, pattern Expr) Expr {
-	return Function("like", haystack, pattern)
-}
-
-// Position returns `position(<haystack>, <needle>)` function call expression.
-func Position(haystack, needle Expr) Expr {
-	return Function("position", haystack, needle)
-}
-
-// PositionUTF8 returns `positionUTF8(<haystack>, <needle>)` function call expression.
-func PositionUTF8(haystack, needle Expr) Expr {
-	return Function("positionUTF8", haystack, needle)
-}
-
-// Match returns `match(<haystack>, <pattern>)` function call expression.
-func Match(haystack, pattern Expr) Expr {
-	return Function("match", haystack, pattern)
-}
-
-// HasToken returns `hasToken(<haystack>, <token>)` function call expression.
-func HasToken(haystack Expr, token string) Expr {
-	return Function("hasToken", haystack, String(token))
-}
-
-// SimpleJSONHas returns `simpleJSONHas(<json>, <field>)` function call expression.
-func SimpleJSONHas(json Expr, field string) Expr {
-	return Function("simpleJSONHas", json, String(field))
-}
-
-// JSONExtract returns `JSONExtract(<from>, <typ>)` function call expression.
-func JSONExtract(from Expr, typ string) Expr {
-	return Function("JSONExtract", from, String(typ))
-}
-
-// JSONExtractField returns `JSONExtract(<from>, <field>, <typ>)` function call expression.
-func JSONExtractField(from Expr, field, typ string) Expr {
-	return Function("JSONExtract", from, String(field), String(typ))
-}
-
-// JSONExtractKeys returns `JSONExtractKeys(<from>)` function call expression.
-func JSONExtractKeys(from Expr) Expr {
-	return Function("JSONExtractKeys", from)
-}
-
-// JSONExtractString returns `JSONExtractString(<from>, <field>)` function call expression.
-func JSONExtractString(from Expr, field string) Expr {
-	return Function("JSONExtractString", from, String(field))
 }

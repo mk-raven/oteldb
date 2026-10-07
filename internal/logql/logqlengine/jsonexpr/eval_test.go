@@ -8,7 +8,7 @@ import (
 	"github.com/go-faster/jx"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql"
 )
 
 func parseExprs(t require.TestingT, exprs ...string) map[logql.Label]Path {
@@ -171,7 +171,6 @@ func TestExtract(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			d := jx.DecodeStr(tt.input)
 			got := make(map[logql.Label]string, len(tt.paths))

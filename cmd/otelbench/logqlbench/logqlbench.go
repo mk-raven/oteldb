@@ -15,9 +15,9 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 
-	"github.com/go-faster/oteldb/cmd/otelbench/chtracker"
-	"github.com/go-faster/oteldb/internal/lokiapi"
-	"github.com/go-faster/oteldb/internal/lokihandler"
+	"github.com/oteldb/oteldb/cmd/otelbench/chtracker"
+	"github.com/oteldb/oteldb/internal/lokiapi"
+	"github.com/oteldb/oteldb/internal/lokihandler"
 )
 
 type LogQLBenchmark struct {
@@ -124,7 +124,7 @@ func (p *LogQLBenchmark) Run(ctx context.Context) error {
 	if p.TrackerOptions.Trace {
 		fmt.Println("waiting for traces")
 		if err := p.tracker.Flush(ctx); err != nil {
-			return errors.Wrap(err, "flush traces")
+			fmt.Println("warning: flush traces:", err)
 		}
 	} else {
 		fmt.Println("saving")

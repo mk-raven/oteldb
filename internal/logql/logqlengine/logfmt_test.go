@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine/logqlabels"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine/logqlabels"
 )
 
 func TestLogfmtExtractor(t *testing.T) {
@@ -81,7 +81,6 @@ func TestLogfmtExtractor(t *testing.T) {
 		{`label==`, []logql.Label{"label"}, nil, nil, true},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			e, err := buildLogfmtExtractor(&logql.LogfmtExpressionParser{
 				Labels: tt.labels,

@@ -6,13 +6,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-faster/oteldb/internal/iterators"
-	"github.com/go-faster/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/iterators"
+	"github.com/oteldb/oteldb/internal/logql"
 )
-
-func ptrTo[T any](v T) *T {
-	return &v
-}
 
 func TestSortVectorAggregation(t *testing.T) {
 	steps := []Step{
@@ -32,14 +28,14 @@ func TestSortVectorAggregation(t *testing.T) {
 		expect []Sample
 	}{
 		{
-			&logql.VectorAggregationExpr{Op: logql.VectorOpBottomk, Parameter: ptrTo(2)},
+			&logql.VectorAggregationExpr{Op: logql.VectorOpBottomk, Parameter: new(2)},
 			[]Sample{
 				{Data: 1, Set: emptyLabels()},
 				{Data: 2, Set: emptyLabels()},
 			},
 		},
 		{
-			&logql.VectorAggregationExpr{Op: logql.VectorOpBottomk, Parameter: ptrTo(3)},
+			&logql.VectorAggregationExpr{Op: logql.VectorOpBottomk, Parameter: new(3)},
 			[]Sample{
 				{Data: 1, Set: emptyLabels()},
 				{Data: 2, Set: emptyLabels()},
@@ -47,14 +43,14 @@ func TestSortVectorAggregation(t *testing.T) {
 			},
 		},
 		{
-			&logql.VectorAggregationExpr{Op: logql.VectorOpTopk, Parameter: ptrTo(2)},
+			&logql.VectorAggregationExpr{Op: logql.VectorOpTopk, Parameter: new(2)},
 			[]Sample{
 				{Data: 4, Set: emptyLabels()},
 				{Data: 3, Set: emptyLabels()},
 			},
 		},
 		{
-			&logql.VectorAggregationExpr{Op: logql.VectorOpTopk, Parameter: ptrTo(3)},
+			&logql.VectorAggregationExpr{Op: logql.VectorOpTopk, Parameter: new(3)},
 			[]Sample{
 				{Data: 4, Set: emptyLabels()},
 				{Data: 3, Set: emptyLabels()},
@@ -81,12 +77,11 @@ func TestSortVectorAggregation(t *testing.T) {
 		},
 
 		{
-			&logql.VectorAggregationExpr{Op: logql.VectorOpBottomk, Parameter: ptrTo(0)},
+			&logql.VectorAggregationExpr{Op: logql.VectorOpBottomk, Parameter: new(0)},
 			nil,
 		},
 	}
 	for i, tt := range tests {
-		tt := tt
 		t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 			input := iterators.Slice(steps)
 

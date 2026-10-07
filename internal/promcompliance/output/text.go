@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/go-faster/oteldb/internal/promcompliance/comparer"
-	"github.com/go-faster/oteldb/internal/promcompliance/config"
+	"github.com/oteldb/oteldb/internal/promcompliance/comparer"
+	"github.com/oteldb/oteldb/internal/promcompliance/config"
 )
 
 // Text produces text-based output for a number of query results.
@@ -43,6 +43,10 @@ func Text(results []*comparer.Result, includePassing bool, tweaks []*config.Quer
 			if res.Diff != "" {
 				fmt.Println("Query returned different results:")
 				fmt.Println(res.Diff)
+			}
+			if res.RepeatDiff != "" {
+				fmt.Println("Query returned inconsistent results across repeated runs:")
+				fmt.Println(res.RepeatDiff)
 			}
 		}
 	}

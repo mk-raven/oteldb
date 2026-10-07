@@ -3,13 +3,15 @@ package promproxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/go-faster/errors"
 	"github.com/go-faster/sdk/zctx"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
-	"github.com/go-faster/oteldb/internal/promapi"
+	"github.com/oteldb/oteldb/internal/promapi"
 )
 
 var _ promapi.Handler = &Server{}
@@ -148,11 +150,20 @@ func (s Server) NewError(ctx context.Context, err error) *promapi.FailStatusCode
 		// Pass as-is.
 		return v
 	}
+	msg := appendTrace(ctx, err.Error())
 	return &promapi.FailStatusCode{
 		StatusCode: http.StatusInternalServerError,
 		Response: promapi.Fail{
-			Error:     err.Error(),
+			Error:     msg,
 			ErrorType: promapi.FailErrorTypeInternal,
 		},
 	}
+}
+
+func appendTrace(ctx context.Context, s string) string {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return s
+	}
+	return fmt.Sprintf("%s (trace_id=%s, span_id=%s)", s, sc.TraceID(), sc.SpanID())
 }

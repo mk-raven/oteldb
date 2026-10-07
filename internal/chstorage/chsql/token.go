@@ -1,5 +1,7 @@
 package chsql
 
+import "slices"
+
 // IsSingleToken whether if given string is a single token.
 //
 // See https://clickhouse.com/docs/en/sql-reference/functions/string-search-functions#hastoken.
@@ -10,12 +12,7 @@ func IsSingleToken[S ~string | ~[]byte](s S) bool {
 	}
 	// If string does contain any non-alphanumeric ASCII characters.
 	// then it is not a single token.
-	for _, c := range []byte(s) {
-		if isTokenSeparator(c) {
-			return false
-		}
-	}
-	return true
+	return !slices.ContainsFunc([]byte(s), isTokenSeparator)
 }
 
 // CollectTokens iterates over tokens in given string.
@@ -43,6 +40,27 @@ func CollectTokens[S ~string | ~[]byte](s S, cb func(s S) bool) {
 	if tok := s[lastIdx:]; len(tok) > 0 {
 		cb(s[lastIdx:])
 	}
+}
+
+// SkipFirstLastToken drops the leading and trailing partial tokens of s: the run of token
+// characters touching each end, up to the first/last token separator.
+//
+// It must be applied to a substring or regexp literal before deriving bloom tokens from it (via
+// [CollectTokens]). A `hasToken` skip index stores whole tokens, but a literal only occurs as a
+// substring of the value, so its first and last tokens may be fragments of a larger token there —
+// "error" occurs inside "myerror", whose only token is "myerror" — and testing them would wrongly
+// prune a granule holding a real match. Only the interior tokens, bounded by separators on both
+// sides within the literal, are guaranteed whole tokens of every matching value. A single-token
+// literal collapses to empty (no pruning, but no false negatives).
+func SkipFirstLastToken[S ~string | ~[]byte](s S) S {
+	lo, hi := 0, len(s)
+	for lo < hi && !isTokenSeparator(s[lo]) {
+		lo++
+	}
+	for hi > lo && !isTokenSeparator(s[hi-1]) {
+		hi--
+	}
+	return s[lo:hi]
 }
 
 func isTokenSeparator(c byte) bool {

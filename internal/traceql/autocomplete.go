@@ -4,7 +4,7 @@ import (
 	"regexp/syntax"
 	"strings"
 
-	"github.com/go-faster/oteldb/internal/traceql/lexer"
+	"github.com/oteldb/oteldb/internal/traceql/lexer"
 )
 
 // Autocomplete is a AND set of spanset matchers.
@@ -147,7 +147,10 @@ func parseSimpleFieldExpr(p *parser) (FieldExpr, bool, error) {
 		return s, true, nil
 	}
 
-	if a, ok := p.tryAttribute(); ok {
+	switch a, ok, err := p.tryAttribute(); {
+	case err != nil:
+		return nil, false, err
+	case ok:
 		return &a, true, nil
 	}
 	return nil, false, nil

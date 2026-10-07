@@ -1,0 +1,14 @@
+{
+  "severity": {
+    "str": "Debug",
+    "number": 5,
+    "text": "debug"
+  },
+  "body": "Fibonacci is everywhere",
+  "timestamp": "2023-12-04T10:59:00Z",
+  "observed_timestamp": "2026-01-20T01:02:03.000000004Z",
+  "attrs": {
+    "Scale": "833 cents",
+    "Interval": 833.09
+  }
+}

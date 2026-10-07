@@ -14,33 +14,31 @@ import (
 // IngestParams is parameters of ingest operation.
 type IngestParams struct {
 	Name SegmentKey
-	// Start of time range in `attime` format.
-	// Defaults to now.
-	From OptAtTime
-	// End of time range in `attime` format.
-	// Defaults to now.
-	Until OptAtTime
-	// Sample rate.
-	// Defaults to `100`.
+	// Start of time range in `attime` format. Defaults to now.
+	From OptAtTime `json:",omitempty,omitzero"`
+	// End of time range in `attime` format. Defaults to now.
+	Until OptAtTime `json:",omitempty,omitzero"`
+	// Sample rate. Defaults to `100`.
+	//
 	// NOTE: Pyroscope ignores parameter if it is invalid.
-	SampleRate OptUint32
-	SpyName    OptString
+	SampleRate OptUint32 `json:",omitempty,omitzero"`
+	SpyName    OptString `json:",omitempty,omitzero"`
 	// Could be
-	// - `samples`
-	// - `objects`
-	// - `goroutines`
-	// - `bytes`
-	// - `lock_nanoseconds`
-	// - `lock_samples`
-	// but Pyroscope does not check it, so we don't either.
-	Units OptString
+	//
+	//  - `samples`
+	//  - `objects`
+	//  - `goroutines`
+	//  - `bytes`
+	//  - `lock_nanoseconds`
+	//  - `lock_samples` but Pyroscope does not check it, so we don't either.
+	Units OptString `json:",omitempty,omitzero"`
 	// Could be
-	// - `average`
-	// - `sum`
-	// but Pyroscope does not check it, so we don't either.
-	AggregationType OptString
+	//
+	//  - `average`
+	//  - `sum` but Pyroscope does not check it, so we don't either.
+	AggregationType OptString `json:",omitempty,omitzero"`
 	// Input format.
-	Format OptString
+	Format OptString `json:",omitempty,omitzero"`
 }
 
 func unpackIngestParams(packed middleware.Parameters) (params IngestParams) {
@@ -470,14 +468,12 @@ func decodeIngestParams(args [0]string, argsEscaped bool, r *http.Request) (para
 type LabelValuesParams struct {
 	// Label to lookup values.
 	Label string
-	// Start of time range in `attime` format.
-	// For now, Pyroscope ignores parameter, if `query` is not set.
-	From OptAtTime
-	// End of time range in `attime` format.
-	// For now, Pyroscope ignores parameter, if `query` is not set.
-	Until OptAtTime
+	// Start of time range in `attime` format. For now, Pyroscope ignores parameter, if `query` is not set.
+	From OptAtTime `json:",omitempty,omitzero"`
+	// End of time range in `attime` format. For now, Pyroscope ignores parameter, if `query` is not set.
+	Until OptAtTime `json:",omitempty,omitzero"`
 	// FrameQL query.
-	Query OptString
+	Query OptString `json:",omitempty,omitzero"`
 }
 
 func unpackLabelValuesParams(packed middleware.Parameters) (params LabelValuesParams) {
@@ -698,14 +694,12 @@ func decodeLabelValuesParams(args [0]string, argsEscaped bool, r *http.Request) 
 
 // LabelsParams is parameters of labels operation.
 type LabelsParams struct {
-	// Start of time range in `attime` format.
-	// For now, Pyroscope ignores parameter, if `query` is not set.
-	From OptAtTime
-	// End of time range in `attime` format.
-	// For now, Pyroscope ignores parameter, if `query` is not set.
-	Until OptAtTime
+	// Start of time range in `attime` format. For now, Pyroscope ignores parameter, if `query` is not set.
+	From OptAtTime `json:",omitempty,omitzero"`
+	// End of time range in `attime` format. For now, Pyroscope ignores parameter, if `query` is not set.
+	Until OptAtTime `json:",omitempty,omitzero"`
 	// FrameQL query.
-	Query OptString
+	Query OptString `json:",omitempty,omitzero"`
 }
 
 func unpackLabelsParams(packed middleware.Parameters) (params LabelsParams) {
@@ -884,14 +878,14 @@ func decodeLabelsParams(args [0]string, argsEscaped bool, r *http.Request) (para
 // RenderParams is parameters of render operation.
 type RenderParams struct {
 	// Start of time range in `attime` format.
-	From OptAtTime
+	From OptAtTime `json:",omitempty,omitzero"`
 	// End of time range in `attime` format.
-	Until OptAtTime
+	Until OptAtTime `json:",omitempty,omitzero"`
 	// FrameQL query.
-	Query    OptString
-	Name     OptSegmentKey
-	GroupBy  OptString
-	MaxNodes OptInt
+	Query    OptString     `json:",omitempty,omitzero"`
+	Name     OptSegmentKey `json:",omitempty,omitzero"`
+	GroupBy  OptString     `json:",omitempty,omitzero"`
+	MaxNodes OptInt        `json:",omitempty,omitzero"`
 	// Response format.
 	Format RenderFormat
 }

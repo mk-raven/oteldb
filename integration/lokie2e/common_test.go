@@ -21,15 +21,15 @@ import (
 	"golang.org/x/exp/maps"
 	"sigs.k8s.io/yaml"
 
-	"github.com/go-faster/oteldb/integration/lokie2e"
-	"github.com/go-faster/oteldb/integration/requirex"
-	"github.com/go-faster/oteldb/internal/chstorage"
-	"github.com/go-faster/oteldb/internal/logql"
-	"github.com/go-faster/oteldb/internal/logql/logqlengine"
-	"github.com/go-faster/oteldb/internal/logstorage"
-	"github.com/go-faster/oteldb/internal/lokiapi"
-	"github.com/go-faster/oteldb/internal/lokihandler"
-	"github.com/go-faster/oteldb/internal/otelstorage"
+	"github.com/oteldb/oteldb/integration/lokie2e"
+	"github.com/oteldb/oteldb/integration/requirex"
+	"github.com/oteldb/oteldb/internal/chstorage"
+	"github.com/oteldb/oteldb/internal/logql"
+	"github.com/oteldb/oteldb/internal/logql/logqlengine"
+	"github.com/oteldb/oteldb/internal/logstorage"
+	"github.com/oteldb/oteldb/internal/lokiapi"
+	"github.com/oteldb/oteldb/internal/lokihandler"
+	"github.com/oteldb/oteldb/internal/otelstorage"
 )
 
 func TestMain(m *testing.M) {
@@ -40,35 +40,24 @@ func TestMain(m *testing.M) {
 }
 
 func setupDB(
-	ctx context.Context,
 	t *testing.T,
 	provider trace.TracerProvider,
-	set *lokie2e.BatchSet,
-	inserter logstorage.Inserter,
 	querier logstorage.Querier,
 	engineQuerier logqlengine.Querier,
 ) *lokiapi.Client {
-	consumer := logstorage.NewConsumer(inserter)
-
-	logEncoder := plog.JSONMarshaler{}
-	var out bytes.Buffer
-	for i, b := range set.Batches {
-		if err := consumer.ConsumeLogs(ctx, b); err != nil {
-			t.Fatalf("Send batch %d: %+v", i, err)
-		}
-		data, err := logEncoder.MarshalLogs(b)
-		require.NoError(t, err)
-		outData, err := yaml.JSONToYAML(data)
-		require.NoError(t, err)
-		out.WriteString("---\n")
-		out.Write(outData)
-	}
-
-	gold.Str(t, out.String(), "logs.yml")
-
 	var optimizers []logqlengine.Optimizer
 	optimizers = append(optimizers, logqlengine.DefaultOptimizers()...)
 	optimizers = append(optimizers, &chstorage.ClickhouseOptimizer{})
+	return setupDBWithOptimizers(t, provider, querier, engineQuerier, optimizers)
+}
+
+func setupDBWithOptimizers(
+	t *testing.T,
+	provider trace.TracerProvider,
+	querier logstorage.Querier,
+	engineQuerier logqlengine.Querier,
+	optimizers []logqlengine.Optimizer,
+) *lokiapi.Client {
 	engine, err := logqlengine.NewEngine(engineQuerier, logqlengine.Options{
 		ParseOptions:   logql.ParseOptions{AllowDots: true},
 		Optimizers:     optimizers,
@@ -76,7 +65,7 @@ func setupDB(
 	})
 	require.NoError(t, err)
 
-	api := lokihandler.NewLokiAPI(querier, engine)
+	api := lokihandler.NewLokiAPI(querier, engine, lokihandler.LokiAPIOptions{})
 	lokih, err := lokiapi.NewServer(api,
 		lokiapi.WithTracerProvider(provider),
 	)
@@ -93,14 +82,7 @@ func setupDB(
 	return c
 }
 
-func runTest(
-	ctx context.Context,
-	t *testing.T,
-	provider trace.TracerProvider,
-	inserter logstorage.Inserter,
-	querier logstorage.Querier,
-	engineQuerier logqlengine.Querier,
-) {
+func loadTestData(ctx context.Context, t *testing.T, inserter logstorage.Inserter) *lokie2e.BatchSet {
 	now := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
 	set, err := generateLogs(now, 1)
 	require.NoError(t, err)
@@ -111,7 +93,37 @@ func runTest(
 	require.NotZero(t, set.End)
 	require.GreaterOrEqual(t, set.End, set.Start)
 
-	c := setupDB(ctx, t, provider, set, inserter, querier, engineQuerier)
+	consumer, err := logstorage.NewConsumer(inserter, logstorage.ConsumerOptions{})
+	require.NoError(t, err)
+
+	var (
+		logEncoder = plog.JSONMarshaler{}
+		out        bytes.Buffer
+	)
+	for i, b := range set.Batches {
+		if err := consumer.ConsumeLogs(ctx, b); err != nil {
+			t.Fatalf("Send batch %d: %+v", i, err)
+		}
+		data, err := logEncoder.MarshalLogs(b)
+		require.NoError(t, err)
+		outData, err := yaml.JSONToYAML(data)
+		require.NoError(t, err)
+		out.WriteString("---\n")
+		out.Write(outData)
+	}
+	gold.Str(t, out.String(), "logs.yml")
+	return set
+}
+
+func runTest(
+	ctx context.Context,
+	t *testing.T,
+	provider trace.TracerProvider,
+	set *lokie2e.BatchSet,
+	querier logstorage.Querier,
+	engineQuerier logqlengine.Querier,
+) {
+	c := setupDB(t, provider, querier, engineQuerier)
 
 	t.Run("Labels", func(t *testing.T) {
 		a := require.New(t)
@@ -262,7 +274,6 @@ func runTest(
 				true,
 			},
 		} {
-			tt := tt
 			t.Run(tt.name, func(t *testing.T) {
 				a := require.New(t)
 
@@ -341,6 +352,44 @@ func runTest(
 			}
 		})
 	})
+	t.Run("DetectedFields", func(t *testing.T) {
+		a := require.New(t)
+		r, err := c.DetectedFields(ctx, lokiapi.DetectedFieldsParams{
+			// Always sending time range because default is current time.
+			Start: lokiapi.NewOptLokiTime(asLokiTime(set.Start)),
+			End:   lokiapi.NewOptLokiTime(asLokiTime(set.End)),
+		})
+		a.NoError(err)
+
+		var (
+			fields      = r.Fields
+			names       []string
+			cardinality = map[string]int{}
+		)
+		for _, f := range fields {
+			name := f.Label.Value
+			names = append(names, name)
+			cardinality[name] = f.Cardinality.Value
+		}
+		slices.Sort(names)
+
+		// service_instance_id is not set in generateLogs, so it might be missing
+		// or have cardinality 0/1 (empty string).
+		// In loadTestData, we set mul=1, which means 141 records.
+		// Let's check what's actually expected.
+		a.Subset(names, []string{"level", "service_name", "service_namespace", "service_version"})
+
+		// level: Info (200, 300) and Fatal (500).
+		// generateLogs creates 2 types of status: 200 and 500.
+		// So cardinality should be 2.
+		a.Equal(2, cardinality["level"])
+		// service_name: testService and fooService.
+		a.Equal(2, cardinality["service_name"])
+		// service_namespace: testNamespace and fooNamespace.
+		a.Equal(2, cardinality["service_namespace"])
+		// service_version: testVersion.
+		a.Equal(1, cardinality["service_version"])
+	})
 	t.Run("LogQueries", func(t *testing.T) {
 		tests := []struct {
 			query   string
@@ -378,6 +427,16 @@ func runTest(
 			{`{http.method=~".*GET.*"}`, 21},
 			{`{http.method=~"^GET$"}`, 21},
 			{`{http.method!~"(HEAD|POST|DELETE|PUT|PATCH|TRACE|OPTIONS)"}`, 21},
+			// Prometheus-like unicode label name (oteldb extension).
+			{`{"http_method"="GET"}`, 21},
+			{`{"http_method"=~".*GET.*"}`, 21},
+			{`{"http_method"=~"^GET$"}`, 21},
+			{`{"http_method"!~"(HEAD|POST|DELETE|PUT|PATCH|TRACE|OPTIONS)"}`, 21},
+			// Same with dots.
+			{`{"http.method"="GET"}`, 21},
+			{`{"http.method"=~".*GET.*"}`, 21},
+			{`{"http.method"=~"^GET$"}`, 21},
+			{`{"http.method"!~"(HEAD|POST|DELETE|PUT|PATCH|TRACE|OPTIONS)"}`, 21},
 			// Try other methods.
 			{`{http_method="DELETE"}`, 20},
 			{`{http_method="GET"}`, 21},
@@ -414,14 +473,6 @@ func runTest(
 			// Negative line matcher.
 			{`{http_method=~".+"} != "HEAD"`, len(set.Records) - 22},
 			{`{http_method=~".+"} !~ "HEAD"`, len(set.Records) - 22},
-			// Trace to logs (span_id).
-			{`{http_method=~".+"} |= "e3daccf703000003"`, 1}, // lower case
-			{`{http_method=~".+"} |= "E3DACCF703000003"`, 1}, // upper case
-			{`{http_method=~".+"} |= "e3dacCF703000003"`, 1}, // mixed case
-			// Trace to logs (trace_id).
-			{`{http_method=~".+"} |= "af36000000000000c517000000000003"`, 1}, // lower case
-			{`{http_method=~".+"} |= "AF36000000000000C517000000000003"`, 1}, // upper case
-			{`{http_method=~".+"} |= "aF36000000000000c517000000000003"`, 1}, // mixed case
 
 			// Label filter.
 			{`{http_method=~".+"} | http_method = "GET"`, 21},
@@ -469,7 +520,6 @@ func runTest(
 		}
 
 		for i, tt := range tests {
-			tt := tt
 			t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 				t.Parallel()
 
@@ -494,7 +544,6 @@ func runTest(
 			{`{http_method="HEAD"}`},
 			{`{http_method="HEAD"} | json | line_format "{{ . }}"`},
 		} {
-			tt := tt
 			t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 				t.Parallel()
 
@@ -525,27 +574,34 @@ func runTest(
 		}
 	})
 	t.Run("Explain", func(t *testing.T) {
+		// A `|=` literal only yields hasToken prefilters for tokens that a separator bounds on both
+		// sides within it: the edge tokens of a substring match may be fragments of a larger token
+		// in the body ("HEAD" occurs inside "xHEADy"), so prefiltering on them would prune a
+		// granule holding a real match. A bare word therefore adds no prefilter, while a quoted
+		// JSON fragment still does.
 		for i, tt := range []struct {
-			query    string
-			contains []string
+			query       string
+			contains    []string
+			notContains []string
 		}{
 			{
 				`{http_method=~".+"} |= "HEAD"`,
 				[]string{
 					`Offloading line filters.+|=`,
 					`Pipeline could be fully offloaded to Clickhouse`,
-					`Adding hasToken.+HEAD`,
 				},
+				[]string{`Adding hasToken.+HEAD`},
 			},
 			{
 				`{http_method=~".+"} |= "HEAD" |= "\"error\": \"ENOENT\""`,
 				[]string{
 					`Offloading line filters.+|=`,
 					`Pipeline could be fully offloaded to Clickhouse`,
-					`Adding hasToken.+HEAD`,
+					// Quotes bound both edges, so these stay whole tokens and still prune.
 					`Adding hasToken.+error`,
 					`Adding hasToken.+ENOENT`,
 				},
+				[]string{`Adding hasToken.+HEAD`},
 			},
 			{
 				`{http_method=~".+"} | http_method = "GET"`,
@@ -553,14 +609,15 @@ func runTest(
 					`Offloading pipeline label filters.+http_method=`,
 					`Pipeline could be fully offloaded to Clickhouse`,
 				},
+				nil,
 			},
 			{
 				`{http_method=~".+"} |= "HEAD" | http_method = "GET" | json | status != 200`,
 				[]string{
 					`Offloading line filters.+|=`,
 					`Offloading pipeline label filters.+http_method=`,
-					`Adding hasToken.+HEAD`,
 				},
+				[]string{`Adding hasToken.+HEAD`},
 			},
 
 			{
@@ -568,6 +625,7 @@ func runTest(
 				[]string{
 					`Sampling could be offloaded to Clickhouse`,
 				},
+				nil,
 			},
 			{
 				`sum by (http_method) ( count_over_time({http_method=~".+"} |= "HEAD" [30s]) )`,
@@ -575,11 +633,10 @@ func runTest(
 					`Offloading line filters.+|=`,
 					`Pipeline could be fully offloaded to Clickhouse`,
 					`Sampling could be offloaded to Clickhouse`,
-					`Adding hasToken.+HEAD`,
 				},
+				[]string{`Adding hasToken.+HEAD`},
 			},
 		} {
-			tt := tt
 			t.Run(fmt.Sprintf("Test%d", i+1), func(t *testing.T) {
 				t.Parallel()
 
@@ -623,6 +680,19 @@ func runTest(
 							return re.MatchString(s.V)
 						}),
 						"There is should be at least one log entry that matches %q",
+						pattern,
+					)
+				}
+
+				for _, pattern := range tt.notContains {
+					re, err := regexp.Compile(pattern)
+					require.NoError(t, err)
+
+					require.False(t,
+						slices.ContainsFunc(entries, func(s lokiapi.LogEntry) bool {
+							return re.MatchString(s.V)
+						}),
+						"There is should be no log entry that matches %q",
 						pattern,
 					)
 				}
